@@ -10,7 +10,7 @@ metadata:
       == "konflux-master"
   creationTimestamp: null
   labels:
-    appstudio.openshift.io/application: prucek-ci-tools
+    appstudio.openshift.io/application: prucek-ci-tools-2
     appstudio.openshift.io/component: pod-scaler
     pipelines.appstudio.openshift.io/type: build
   name: pod-scaler-on-push

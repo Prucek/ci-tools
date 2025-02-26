@@ -9,7 +9,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 
 	"k8s.io/utils/diff"
-	utilpointer "k8s.io/utils/pointer"
+	utilpointer "k8s.io/utils/ptr"
 
 	"github.com/openshift/ci-tools/pkg/api"
 	"github.com/openshift/ci-tools/pkg/testhelper"
@@ -89,6 +89,21 @@ func TestValidateBuildRoot(t *testing.T) {
 			},
 			ref:           "org.repo",
 			expectedValid: true,
+		},
+		{
+			name: "external image in build_root valid",
+			buildRootImageConfig: &api.BuildRootImageConfiguration{
+				ExternalImage: "quay.io/org/repo:tag",
+			},
+			expectedValid: true,
+		},
+		{
+			name: "Both external image and from_repository causes error",
+			buildRootImageConfig: &api.BuildRootImageConfiguration{
+				ExternalImage:  "quay.io/org/repo:tag",
+				FromRepository: true,
+			},
+			expectedValid: false,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -459,7 +474,7 @@ func TestValidateImages(t *testing.T) {
 			name: "Dockerfile literal is mutually exclusive with context_dir",
 			input: []api.ProjectDirectoryImageBuildStepConfiguration{{
 				ProjectDirectoryImageBuildInputs: api.ProjectDirectoryImageBuildInputs{
-					DockerfileLiteral: utilpointer.StringPtr("FROM foo"),
+					DockerfileLiteral: utilpointer.To("FROM foo"),
 					ContextDir:        "foo",
 				},
 				To: "amsterdam",
@@ -472,7 +487,7 @@ func TestValidateImages(t *testing.T) {
 			name: "Dockerfile literal is mutually exclusive with dockerfile_path",
 			input: []api.ProjectDirectoryImageBuildStepConfiguration{{
 				ProjectDirectoryImageBuildInputs: api.ProjectDirectoryImageBuildInputs{
-					DockerfileLiteral: utilpointer.StringPtr("FROM foo"),
+					DockerfileLiteral: utilpointer.To("FROM foo"),
 					DockerfilePath:    "foo",
 				},
 				To: "amsterdam",

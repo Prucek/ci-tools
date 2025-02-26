@@ -72,14 +72,20 @@ func (s *inputImageTagStep) Run(ctx context.Context) error {
 }
 
 func (s *inputImageTagStep) run(ctx context.Context) error {
-	logrus.Infof("Tagging %s into %s:%s.", s.config.BaseImage.ISTagName(), api.PipelineImageStream, s.config.To)
-
 	if _, err := s.Inputs(); err != nil {
 		return fmt.Errorf("could not resolve inputs for image tag step: %w", err)
 	}
+	var objectReferenceName string
+	if len(s.config.ExternalImage) > 0 {
+		logrus.Infof("Tagging %s into %s:%s.", s.config.ExternalImage, api.PipelineImageStream, s.config.To)
+		objectReferenceName = s.config.ExternalImage
+	} else {
+		logrus.Infof("Tagging %s into %s:%s.", s.config.BaseImage.ISTagName(), api.PipelineImageStream, s.config.To)
+		objectReferenceName = api.QuayImageReference(s.config.BaseImage)
+	}
 	from := &coreapi.ObjectReference{
 		Kind: "DockerImage",
-		Name: api.QuayImageReference(s.config.BaseImage),
+		Name: objectReferenceName,
 	}
 	if api.IsCreatedForClusterBotJob(s.config.BaseImage.Namespace) {
 		from = &coreapi.ObjectReference{
@@ -173,8 +179,9 @@ func InputImageTagStep(
 	jobSpec *api.JobSpec) api.Step {
 	// when source and destination client are the same, we don't need to use external imports
 	return &inputImageTagStep{
-		config:  config,
-		client:  client,
-		jobSpec: jobSpec,
+		config:    config,
+		client:    client,
+		jobSpec:   jobSpec,
+		imageName: config.ExternalImage,
 	}
 }

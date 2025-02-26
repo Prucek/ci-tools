@@ -37,6 +37,7 @@ const ciOperatorReferenceYaml = "# The list of base images describe\n" +
 	"# the pipeline will caches on. The one way is to take the reference\n" +
 	"# from an image stream, and the other from a dockerfile.\n" +
 	"build_root:\n" +
+	"    external_image: ' '\n" +
 	"    # If the BuildRoot images pullspec should be read from a file in the repository (BuildRootImageFileName).\n" +
 	"    from_repository: true\n" +
 	"    image_stream_tag:\n" +
@@ -95,6 +96,7 @@ const ciOperatorReferenceYaml = "# The list of base images describe\n" +
 	"# DO NOT set this in the config\n" +
 	"build_roots:\n" +
 	"    \"\":\n" +
+	"        external_image: ' '\n" +
 	"        # If the BuildRoot images pullspec should be read from a file in the repository (BuildRootImageFileName).\n" +
 	"        from_repository: true\n" +
 	"        image_stream_tag:\n" +
@@ -323,6 +325,7 @@ const ciOperatorReferenceYaml = "# The list of base images describe\n" +
 	"            name: ' '\n" +
 	"            namespace: ' '\n" +
 	"            tag: ' '\n" +
+	"        external_image: ' '\n" +
 	"        # Ref is an optional string linking to the extra_ref in \"org.repo\" format that this belongs to\n" +
 	"        ref: ' '\n" +
 	"        to: ' '\n" +

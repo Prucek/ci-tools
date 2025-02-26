@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -229,19 +230,14 @@ func (v *Validator) ValidateTestStepConfiguration(ctx *configContext, config *ap
 func validateBuildRootImageConfiguration(ctx *configContext, input *api.BuildRootImageConfiguration, hasImages bool, ref string) (ret []error) {
 	if input == nil {
 		if hasImages {
-			return []error{errors.New("when 'images' are specified 'build_root' is required and must have image_stream_tag, project_image or from_repository set")}
+			return []error{errors.New("when 'images' are specified 'build_root' is required and must have image_stream_tag, project_image, from_repository or external_image set")}
 		}
 		return nil
 	}
 
-	if input.ProjectImageBuild != nil && input.ImageStreamTagReference != nil {
-		ret = append(ret, ctx.errorf("image_stream_tag and project_image are mutually exclusive"))
-	} else if input.ProjectImageBuild != nil && input.FromRepository {
-		ret = append(ret, ctx.errorf("project_image and from_repository are mutually exclusive"))
-	} else if input.FromRepository && input.ImageStreamTagReference != nil {
-		ret = append(ret, ctx.errorf("from_repository and image_stream_tag are mutually exclusive"))
-	} else if input.ProjectImageBuild == nil && input.ImageStreamTagReference == nil && !input.FromRepository {
-		ret = append(ret, ctx.errorf("you have to specify one of project_image, image_stream_tag or from_repository"))
+	mutuallyExclusive := []bool{input.ExternalImage != "", input.ProjectImageBuild != nil, input.ImageStreamTagReference != nil, input.FromRepository}
+	if len(slices.DeleteFunc(mutuallyExclusive, func(e bool) bool { return !e })) != 1 {
+		ret = append(ret, ctx.errorf("external_image and project_image, image_stream_tag, from_repository are mutually exclusive and one must be set"))
 	} else if input.ImageStreamTagReference != nil {
 		ret = append(ret, validateBuildRootImageStreamTag(ctx.AddField("image_stream_tag"), *input.ImageStreamTagReference)...)
 	}

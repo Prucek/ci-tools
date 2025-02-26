@@ -643,7 +643,18 @@ func FromConfigStatic(config *api.ReleaseBuildConfiguration) api.GraphConfigurat
 		if repo != "" {
 			root = fmt.Sprintf("%s-%s", root, repo)
 		}
-		if target.FromRepository {
+		if len(target.ExternalImage) > 0 {
+			config := api.InputImageTagStepConfiguration{
+				InputImage: api.InputImage{
+					ExternalImage: target.ExternalImage,
+					To:            api.PipelineImageStreamTagReference(root),
+				},
+				Sources: []api.ImageStreamSource{{SourceType: api.ImageStreamSourceType(root)}},
+			}
+			buildSteps = append(buildSteps, api.StepConfiguration{
+				InputImageTagStepConfiguration: &config,
+			})
+		} else if target.FromRepository {
 			config := api.InputImageTagStepConfiguration{
 				InputImage: api.InputImage{
 					To:  api.PipelineImageStreamTagReference(root),

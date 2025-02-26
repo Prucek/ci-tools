@@ -453,7 +453,8 @@ type BuildRootImageConfiguration struct {
 	ImageStreamTagReference *ImageStreamTagReference          `json:"image_stream_tag,omitempty"`
 	ProjectImageBuild       *ProjectDirectoryImageBuildInputs `json:"project_image,omitempty"`
 	// If the BuildRoot images pullspec should be read from a file in the repository (BuildRootImageFileName).
-	FromRepository bool `json:"from_repository,omitempty"`
+	FromRepository bool   `json:"from_repository,omitempty"`
+	ExternalImage  string `json:"external_image,omitempty"`
 
 	// UseBuildCache enables the import and use of the prior `bin` image
 	// as a build cache, if the underlying build root has not changed since
@@ -642,8 +643,9 @@ func (config *InputImageTagStepConfiguration) AddSources(sources ...ImageStreamS
 }
 
 type InputImage struct {
-	BaseImage ImageStreamTagReference         `json:"base_image"`
-	To        PipelineImageStreamTagReference `json:"to,omitempty"`
+	BaseImage     ImageStreamTagReference         `json:"base_image"`
+	ExternalImage string                          `json:"external_image"`
+	To            PipelineImageStreamTagReference `json:"to,omitempty"`
 
 	// Ref is an optional string linking to the extra_ref in "org.repo" format that this belongs to
 	Ref string `json:"ref,omitempty"`

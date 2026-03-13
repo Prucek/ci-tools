@@ -217,6 +217,10 @@ func (v *Validator) validateTestStepConfiguration(
 			validationErrors = append(validationErrors, fmt.Errorf("%s: job timeout is limited to %s", fieldRootN, maxJobTimeout))
 		}
 
+		if test.SlackReporter != nil && test.SlackReporter.Channel == "" {
+			validationErrors = append(validationErrors, fmt.Errorf("%s.slack_reporter.channel: must be set when slack_reporter is configured", fieldRootN))
+		}
+
 		// Validate Secret/Secrets
 		if test.Secret != nil && test.Secrets != nil {
 			validationErrors = append(validationErrors, fmt.Errorf("test.Secret and test.Secrets cannot both be set"))

@@ -81,7 +81,7 @@ gofmt: cmd/vault-secret-collection-manager/index.js
 # Example:
 #   make update-vendor
 update-vendor:
-	docker run --rm \
+	podman run --rm \
 		--user=$$UID \
 		-v $$(go env GOCACHE):/.cache:Z \
 		-v $$PWD:/go/src/github.com/openshift/ci-tools:Z \

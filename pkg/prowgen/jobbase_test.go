@@ -5,11 +5,9 @@ import (
 	"time"
 
 	"k8s.io/utils/pointer"
-	prowv1 "sigs.k8s.io/prow/pkg/apis/prowjobs/v1"
 	v1 "sigs.k8s.io/prow/pkg/apis/prowjobs/v1"
 
 	ciop "github.com/openshift/ci-tools/pkg/api"
-	"github.com/openshift/ci-tools/pkg/config"
 	"github.com/openshift/ci-tools/pkg/testhelper"
 )
 
@@ -29,6 +27,7 @@ func TestProwJobBaseBuilder(t *testing.T) {
 		images         ciop.ImageConfiguration
 		binCommand     string
 		testBinCommand string
+		prowgen        *ciop.ProwgenExtras
 
 		podSpecBuilder CiOperatorPodSpecGenerator
 		info           *ProwgenInfo
@@ -153,8 +152,8 @@ func TestProwJobBaseBuilder(t *testing.T) {
 			name: "private job without cloning, including podspec",
 			info: &ProwgenInfo{
 				Metadata: ciop.Metadata{Org: "vorg", Repo: "vrepo", Branch: "vbranch"},
-				Config:   config.Prowgen{Private: true},
 			},
+			prowgen:        &ciop.ProwgenExtras{Private: pointer.Bool(true)},
 			prefix:         "default",
 			podSpecBuilder: NewCiOperatorPodSpecGenerator(),
 		},
@@ -162,9 +161,9 @@ func TestProwJobBaseBuilder(t *testing.T) {
 			name: "private job with cloning, including podspec",
 			info: &ProwgenInfo{
 				Metadata: ciop.Metadata{Org: "vorg", Repo: "vrepo", Branch: "vbranch"},
-				Config:   config.Prowgen{Private: true},
 			},
-			prefix: "default",
+			prowgen: &ciop.ProwgenExtras{Private: pointer.Bool(true)},
+			prefix:  "default",
 			inputs: ciop.InputConfiguration{
 				BuildRootImage: &ciop.BuildRootImageConfiguration{FromRepository: true},
 			},
@@ -182,6 +181,7 @@ func TestProwJobBaseBuilder(t *testing.T) {
 				BinaryBuildCommands:     tc.binCommand,
 				TestBinaryBuildCommands: tc.testBinCommand,
 				Metadata:                tc.info.Metadata,
+				Prowgen:                 tc.prowgen,
 			}
 			b := NewProwJobBaseBuilder(ciopconfig, tc.info, tc.podSpecBuilder).Build(tc.prefix)
 			testhelper.CompareWithFixture(t, b)
@@ -194,6 +194,7 @@ func TestGenerateJobBase(t *testing.T) {
 		testName              string
 		name                  string
 		info                  *ProwgenInfo
+		prowgen               *ciop.ProwgenExtras
 		canonicalGoRepository string
 		rehearsable           bool
 	}{
@@ -224,30 +225,30 @@ func TestGenerateJobBase(t *testing.T) {
 			name:     "test",
 			info: &ProwgenInfo{
 				Metadata: ciop.Metadata{Org: "org", Repo: "repo", Branch: "branch"},
-				Config:   config.Prowgen{Private: true},
 			},
+			prowgen: &ciop.ProwgenExtras{Private: pointer.Bool(true)},
 		},
 		{
 			testName: "expose job for private repos with public results",
 			name:     "test",
 			info: &ProwgenInfo{
 				Metadata: ciop.Metadata{Org: "org", Repo: "repo", Branch: "branch"},
-				Config:   config.Prowgen{Private: true, Expose: true},
 			},
+			prowgen: &ciop.ProwgenExtras{Private: pointer.Bool(true), Expose: pointer.Bool(true)},
 		},
 		{
 			testName: "expose option set but not private",
 			name:     "test",
 			info: &ProwgenInfo{
 				Metadata: ciop.Metadata{Org: "org", Repo: "repo", Branch: "branch"},
-				Config:   config.Prowgen{Private: false, Expose: true},
 			},
+			prowgen: &ciop.ProwgenExtras{Expose: pointer.Bool(true)},
 		},
 	}
 
 	for _, testCase := range testCases {
 		t.Run(testCase.testName, func(t *testing.T) {
-			jobBaseGen := NewProwJobBaseBuilder(&ciop.ReleaseBuildConfiguration{CanonicalGoRepository: &testCase.canonicalGoRepository}, testCase.info, newFakePodSpecBuilder()).Rehearsable(testCase.rehearsable).TestName(testCase.name)
+			jobBaseGen := NewProwJobBaseBuilder(&ciop.ReleaseBuildConfiguration{CanonicalGoRepository: &testCase.canonicalGoRepository, Prowgen: testCase.prowgen}, testCase.info, newFakePodSpecBuilder()).Rehearsable(testCase.rehearsable).TestName(testCase.name)
 			testhelper.CompareWithFixture(t, jobBaseGen.Build("pull"))
 		})
 	}
@@ -337,10 +338,10 @@ func TestNewProwJobBaseBuilderForTest(t *testing.T) {
 					Workflow: pointer.StringPtr("workflow"),
 				},
 			},
-			info: &ProwgenInfo{
-				Metadata: ciop.Metadata{Org: "o", Repo: "r", Branch: "b"},
-				Config:   config.Prowgen{EnableSecretsStoreCSIDriver: true},
+			cfg: &ciop.ReleaseBuildConfiguration{
+				Prowgen: &ciop.ProwgenExtras{EnableSecretsStoreCSIDriver: pointer.Bool(true)},
 			},
+			info: defaultInfo,
 		},
 		{
 			name: "simple test with CSI enabled",
@@ -349,10 +350,10 @@ func TestNewProwJobBaseBuilderForTest(t *testing.T) {
 				Commands:                   "make",
 				ContainerTestConfiguration: &ciop.ContainerTestConfiguration{From: "src"},
 			},
-			info: &ProwgenInfo{
-				Metadata: ciop.Metadata{Org: "o", Repo: "r", Branch: "b"},
-				Config:   config.Prowgen{EnableSecretsStoreCSIDriver: true},
+			cfg: &ciop.ReleaseBuildConfiguration{
+				Prowgen: &ciop.ProwgenExtras{EnableSecretsStoreCSIDriver: pointer.Bool(true)},
 			},
+			info: defaultInfo,
 		},
 		{
 			name: "multi-stage test with claim",
@@ -418,49 +419,9 @@ func TestNewProwJobBaseBuilderForTest(t *testing.T) {
 			},
 			info: defaultInfo,
 		},
-		{
-			name: "simple with slack reporter config",
-			test: ciop.TestStepConfiguration{
-				As:                         "unit",
-				Commands:                   "make unit",
-				ContainerTestConfiguration: &ciop.ContainerTestConfiguration{From: "src"},
-			},
-			info: &ProwgenInfo{
-				Metadata: ciop.Metadata{Org: "o", Repo: "r", Branch: "b"},
-				Config: config.Prowgen{
-					SlackReporterConfigs: []config.SlackReporterConfig{
-						{
-							Channel:           "some-channel",
-							JobStatesToReport: []prowv1.ProwJobState{"error"},
-							ReportTemplate:    "some template",
-							JobNames:          []string{"unit", "e2e"},
-						},
-					},
-				},
-			},
-		},
-		{
-			name: "job excluded by patterns should not have slack reporter config",
-			test: ciop.TestStepConfiguration{
-				As:                         "unit-skip",
-				Commands:                   "make unit",
-				ContainerTestConfiguration: &ciop.ContainerTestConfiguration{From: "src"},
-			},
-			info: &ProwgenInfo{
-				Metadata: ciop.Metadata{Org: "o", Repo: "r", Branch: "b"},
-				Config: config.Prowgen{
-					SlackReporterConfigs: []config.SlackReporterConfig{
-						{
-							Channel:             "some-channel",
-							JobStatesToReport:   []prowv1.ProwJobState{"error"},
-							ReportTemplate:      "some template",
-							JobNames:            []string{"unit-skip", "e2e"},
-							ExcludedJobPatterns: []string{".*-skip$"},
-						},
-					},
-				},
-			},
-		},
+		// NOTE: "simple with slack reporter config" and "job excluded by patterns" test cases
+		// removed because they relied on .config.prowgen slack reporter matching which has been removed.
+		// Slack reporter is now configured per-test in ci-operator config.
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {

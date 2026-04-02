@@ -3,6 +3,8 @@ build_root:
     name: release
     namespace: openshift
     tag: golang-1.10
+prowgen:
+  private: true
 resources:
   '*':
     limits:

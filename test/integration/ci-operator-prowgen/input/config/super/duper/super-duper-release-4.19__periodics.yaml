@@ -9,6 +9,7 @@ operator:
   bundles:
   - as: super-duper-bundle
     base_index: operator-index
+  skip_presubmits: true
 releases:
   initial:
     integration:

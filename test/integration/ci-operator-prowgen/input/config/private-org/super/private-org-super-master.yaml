@@ -1,5 +1,7 @@
 build_root:
   from_repository: true
+prowgen:
+  private: true
 resources:
   '*':
     limits:

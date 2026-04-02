@@ -20,43 +20,37 @@ type prowJobBaseBuilder struct {
 	testName string
 }
 
-// isPrivate returns true if the repo is private, checking ci-operator config,
-// .config.prowgen, and the org name (openshift-priv is always private).
+// isPrivate returns true if the repo is private, checking ci-operator config
+// and the org name (openshift-priv is always private).
 func isPrivate(configSpec *cioperatorapi.ReleaseBuildConfiguration, info *ProwgenInfo) bool {
 	if configSpec.Prowgen != nil && configSpec.Prowgen.Private != nil {
 		return *configSpec.Prowgen.Private
 	}
-	if info.Config.Private {
-		return true
-	}
 	return info.Org == "openshift-priv"
 }
 
-// isExposed returns true if jobs should be visible in Deck despite being private,
-// checking both ci-operator config and .config.prowgen.
-func isExposed(configSpec *cioperatorapi.ReleaseBuildConfiguration, info *ProwgenInfo) bool {
+// isExposed returns true if jobs should be visible in Deck despite being private.
+func isExposed(configSpec *cioperatorapi.ReleaseBuildConfiguration) bool {
 	if configSpec.Prowgen != nil && configSpec.Prowgen.Expose != nil {
 		return *configSpec.Prowgen.Expose
 	}
-	return info.Config.Expose
+	return false
 }
 
-// isSecretsStoreCSIDriverEnabled returns true if CSI Secrets Store should be used,
-// checking both ci-operator config and .config.prowgen.
-func isSecretsStoreCSIDriverEnabled(configSpec *cioperatorapi.ReleaseBuildConfiguration, info *ProwgenInfo) bool {
+// isSecretsStoreCSIDriverEnabled returns true if CSI Secrets Store should be used.
+func isSecretsStoreCSIDriverEnabled(configSpec *cioperatorapi.ReleaseBuildConfiguration) bool {
 	if configSpec.Prowgen != nil && configSpec.Prowgen.EnableSecretsStoreCSIDriver != nil {
 		return *configSpec.Prowgen.EnableSecretsStoreCSIDriver
 	}
-	return info.Config.EnableSecretsStoreCSIDriver
+	return false
 }
 
-// areRehearsalsDisabled returns true if all rehearsals are disabled,
-// checking both ci-operator config and .config.prowgen.
-func areRehearsalsDisabled(configSpec *cioperatorapi.ReleaseBuildConfiguration, info *ProwgenInfo) bool {
+// areRehearsalsDisabled returns true if all rehearsals are disabled.
+func areRehearsalsDisabled(configSpec *cioperatorapi.ReleaseBuildConfiguration) bool {
 	if configSpec.Prowgen != nil && configSpec.Prowgen.DisableRehearsals != nil {
 		return *configSpec.Prowgen.DisableRehearsals
 	}
-	return info.Config.Rehearsals.DisableAll
+	return false
 }
 
 // If any included buildRoot uses from_repository we must not skip cloning
@@ -108,7 +102,7 @@ func NewProwJobBaseBuilder(configSpec *cioperatorapi.ReleaseBuildConfiguration, 
 	}
 
 	private := isPrivate(configSpec, info)
-	exposed := isExposed(configSpec, info)
+	exposed := isExposed(configSpec)
 
 	if skipCloning(configSpec) {
 		b.base.UtilityConfig.DecorationConfig = &prowv1.DecorationConfig{SkipCloning: ptr.To(true)}
@@ -189,7 +183,7 @@ func NewProwJobBaseBuilderForTest(configSpec *cioperatorapi.ReleaseBuildConfigur
 		if configSpec.Releases != nil {
 			p.PodSpec.Add(CIPullSecret())
 		}
-		if isSecretsStoreCSIDriverEnabled(configSpec, info) {
+		if isSecretsStoreCSIDriverEnabled(configSpec) {
 			p.PodSpec.Add(
 				GSMConfig(),
 			)
@@ -203,7 +197,7 @@ func NewProwJobBaseBuilderForTest(configSpec *cioperatorapi.ReleaseBuildConfigur
 		if configSpec.Releases != nil {
 			p.PodSpec.Add(CIPullSecret())
 		}
-		if isSecretsStoreCSIDriverEnabled(configSpec, info) {
+		if isSecretsStoreCSIDriverEnabled(configSpec) {
 			p.PodSpec.Add(
 				GSMConfig(),
 			)

@@ -11,7 +11,6 @@ import (
 	prowconfig "sigs.k8s.io/prow/pkg/config"
 
 	ciop "github.com/openshift/ci-tools/pkg/api"
-	"github.com/openshift/ci-tools/pkg/config"
 	"github.com/openshift/ci-tools/pkg/testhelper"
 )
 
@@ -655,35 +654,32 @@ func TestGenerateJobs(t *testing.T) {
 			id: "disabled rehearsals at job level",
 			config: &ciop.ReleaseBuildConfiguration{
 				Tests: []ciop.TestStepConfiguration{
-					{As: "unit", ContainerTestConfiguration: &ciop.ContainerTestConfiguration{From: "bin"}},
+					{As: "unit", DisableRehearsal: ptr.To(true), ContainerTestConfiguration: &ciop.ContainerTestConfiguration{From: "bin"}},
 					{As: "lint", ContainerTestConfiguration: &ciop.ContainerTestConfiguration{From: "bin"}},
-					{As: "periodic-unit", Cron: ptr.To(cron), ContainerTestConfiguration: &ciop.ContainerTestConfiguration{From: "bin"}},
+					{As: "periodic-unit", DisableRehearsal: ptr.To(true), Cron: ptr.To(cron), ContainerTestConfiguration: &ciop.ContainerTestConfiguration{From: "bin"}},
 					{As: "periodic-lint", Cron: ptr.To(cron), ContainerTestConfiguration: &ciop.ContainerTestConfiguration{From: "bin"}},
 				},
 			},
-			repoInfo: &ProwgenInfo{
-				Config: config.Prowgen{Rehearsals: config.Rehearsals{DisabledRehearsals: []string{"unit", "periodic-unit"}}},
-				Metadata: ciop.Metadata{
-					Org:    "organization",
-					Repo:   "repository",
-					Branch: "branch",
-				}},
+			repoInfo: &ProwgenInfo{Metadata: ciop.Metadata{
+				Org:    "organization",
+				Repo:   "repository",
+				Branch: "branch",
+			}},
 		},
 		{
 			id: "disabled rehearsals at repo level",
 			config: &ciop.ReleaseBuildConfiguration{
+				Prowgen: &ciop.ProwgenExtras{DisableRehearsals: ptr.To(true)},
 				Tests: []ciop.TestStepConfiguration{
 					{As: "unit", ContainerTestConfiguration: &ciop.ContainerTestConfiguration{From: "bin"}},
 					{As: "periodic-unit", Cron: ptr.To(cron), ContainerTestConfiguration: &ciop.ContainerTestConfiguration{From: "bin"}},
 				},
 			},
-			repoInfo: &ProwgenInfo{
-				Config: config.Prowgen{Rehearsals: config.Rehearsals{DisableAll: true}},
-				Metadata: ciop.Metadata{
-					Org:    "organization",
-					Repo:   "repository",
-					Branch: "branch",
-				}},
+			repoInfo: &ProwgenInfo{Metadata: ciop.Metadata{
+				Org:    "organization",
+				Repo:   "repository",
+				Branch: "branch",
+			}},
 		},
 		{
 			id: "multiarch postsubmit images",
@@ -728,30 +724,8 @@ func TestGenerateJobs(t *testing.T) {
 				},
 			},
 		},
-		{
-			id: "images job is configured for slack reporting",
-			config: &ciop.ReleaseBuildConfiguration{
-				Images:                 ciop.ImageConfiguration{Items: []ciop.ProjectDirectoryImageBuildStepConfiguration{{}}},
-				PromotionConfiguration: &ciop.PromotionConfiguration{},
-			},
-			repoInfo: &ProwgenInfo{
-				Metadata: ciop.Metadata{
-					Org:    "organization",
-					Repo:   "repository",
-					Branch: "branch",
-				},
-				Config: config.Prowgen{
-					SlackReporterConfigs: []config.SlackReporterConfig{
-						{
-							Channel:           "some-channel",
-							JobStatesToReport: []prowv1.ProwJobState{"error"},
-							ReportTemplate:    "some template",
-							JobNames:          []string{"images", "e2e"},
-						},
-					},
-				},
-			},
-		},
+		// NOTE: "images job is configured for slack reporting" test case removed
+		// because it relied on .config.prowgen slack reporter matching which has been removed.
 		{
 			id: "periodic with capabilities",
 			config: &ciop.ReleaseBuildConfiguration{
@@ -879,7 +853,7 @@ func TestGenerateJobs(t *testing.T) {
 			}},
 		},
 		{
-			id:   "slack reporter from ci-operator config takes precedence over prowgen config",
+			id:   "slack reporter from ci-operator config per-test",
 			keep: true,
 			config: &ciop.ReleaseBuildConfiguration{
 				Tests: []ciop.TestStepConfiguration{
@@ -892,23 +866,11 @@ func TestGenerateJobs(t *testing.T) {
 					},
 				},
 			},
-			repoInfo: &ProwgenInfo{
-				Metadata: ciop.Metadata{
-					Org:    "organization",
-					Repo:   "repository",
-					Branch: "branch",
-				},
-				Config: config.Prowgen{
-					SlackReporterConfigs: []config.SlackReporterConfig{
-						{
-							Channel:           "#from-prowgen",
-							JobStatesToReport: []prowv1.ProwJobState{"error"},
-							ReportTemplate:    "prowgen template",
-							JobNames:          []string{"e2e"},
-						},
-					},
-				},
-			},
+			repoInfo: &ProwgenInfo{Metadata: ciop.Metadata{
+				Org:    "organization",
+				Repo:   "repository",
+				Branch: "branch",
+			}},
 		},
 		{
 			id: "disable rehearsal from ci-operator config per-test",

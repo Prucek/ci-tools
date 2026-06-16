@@ -132,6 +132,8 @@ type multiStageTestStep struct {
 	requireNestedPodman              bool
 	leaseProxyServerAvailable        bool
 	leaseProxyClientConfigMapBackoff wait.Backoff
+	stsHubRoleARN                    string
+	stsTargetRoleARN                 string
 }
 
 func MultiStageTestStep(
@@ -219,6 +221,32 @@ func (s *multiStageTestStep) profileSecretName() (string, error) {
 	return cpSecretName, nil
 }
 
+func (s *multiStageTestStep) retrieveSTSRoleARNParams() error {
+	if s.params == nil {
+		return nil
+	}
+
+	hubRole, err := s.params.Get(api.STSHubRoleARNParam)
+	if err != nil {
+		return fmt.Errorf("get %s: %w", api.STSHubRoleARNParam, err)
+	}
+
+	if hubRole != "" {
+		s.stsHubRoleARN = hubRole
+	}
+
+	targetRole, err := s.params.Get(api.STSTargetRoleARNParam)
+	if err != nil {
+		return fmt.Errorf("get %s: %w", api.STSTargetRoleARNParam, err)
+	}
+
+	if targetRole != "" {
+		s.stsTargetRoleARN = targetRole
+	}
+
+	return nil
+}
+
 func (s *multiStageTestStep) Inputs() (api.InputDefinition, error) {
 	return nil, nil
 }
@@ -232,12 +260,16 @@ func (s *multiStageTestStep) Run(ctx context.Context) error {
 func (s *multiStageTestStep) run(ctx context.Context) error {
 	logrus.Infof("Running multi-stage test %s", s.name)
 
-	clusterProfile, err := getClusterProfileFromParams(s.params)
+	clusterProfile, err := api.ClusterProfileFromParams(s.params)
 	if err != nil {
 		return fmt.Errorf("get cluster profile from parameters: %w", err)
 	}
 	if clusterProfile != "" {
 		s.profile = clusterProfile
+	}
+
+	if err := s.retrieveSTSRoleARNParams(); err != nil {
+		return fmt.Errorf("retrieve STS role ARN params: %w", err)
 	}
 
 	if s.profile != "" {
@@ -292,6 +324,11 @@ func (s *multiStageTestStep) run(ctx context.Context) error {
 	}
 	if err := s.createCommandConfigMaps(ctx); err != nil {
 		return fmt.Errorf("failed to create command configmap: %w", err)
+	}
+	if s.stsHubRoleARN != "" && s.stsTargetRoleARN != "" {
+		if err := s.createSTSConfigMap(ctx); err != nil {
+			return fmt.Errorf("failed to create STS config configmap: %w", err)
+		}
 	}
 	if err := s.setupRBAC(ctx); err != nil {
 		return fmt.Errorf("failed to create RBAC objects: %w", err)
@@ -624,14 +661,6 @@ func getMountPath(secretName string) string {
 
 func volumeName(ns, name string) string {
 	return strings.ReplaceAll(fmt.Sprintf("%s-%s", ns, name), ".", "-")
-}
-
-func getClusterProfileFromParams(params api.Parameters) (api.ClusterProfile, error) {
-	if params == nil {
-		return "", nil
-	}
-	cp, err := params.Get(api.ClusterProfileParam)
-	return api.ClusterProfile(cp), err
 }
 
 // ensureScriptConfigMap copies the lease proxy scripts ConfigMap from src to dst.

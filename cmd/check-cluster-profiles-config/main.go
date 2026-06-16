@@ -5,14 +5,20 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"slices"
+	"sort"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/sirupsen/logrus"
 
 	coreapi "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	ctrlruntimeclient "sigs.k8s.io/controller-runtime/pkg/client"
+	fakectrlruntimeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/yaml"
 
 	"github.com/openshift/ci-tools/pkg/api"
+	"github.com/openshift/ci-tools/pkg/load"
 	"github.com/openshift/ci-tools/pkg/registry/server"
 	"github.com/openshift/ci-tools/pkg/util"
 )
@@ -23,6 +29,7 @@ var (
 
 type options struct {
 	configPath string
+	normalize  bool
 }
 
 type profileValidator struct {
@@ -35,6 +42,7 @@ func gatherOptions() options {
 	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 
 	fs.StringVar(&o.configPath, "config-path", "", "Path to the cluster profile config file")
+	fs.BoolVar(&o.normalize, "normalize", false, "Normalize the cluster profiles")
 
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		logrus.WithError(err).Fatal("could not parse arguments")
@@ -54,69 +62,118 @@ func main() {
 	logger := logrus.WithField("component", "check-cluster-profiles-config")
 	o := gatherOptions()
 
-	inClusterConfig, err := util.LoadClusterConfig()
-	if err != nil {
-		logrus.WithError(err).Fatal("failed to load in-cluster config")
-	}
-	client, err := ctrlruntimeclient.New(inClusterConfig, ctrlruntimeclient.Options{})
-	if err != nil {
-		logrus.WithError(err).Fatal("failed to create client")
-	}
-	validator := newValidator(client)
-
-	list, err := loadConfig(o.configPath)
+	profiles, err := load.ClusterProfileList(o.configPath)
 	if err != nil {
 		logger.WithError(err).Fatal("failed to load cluster profiles from config file")
 	}
 
-	if err := validator.Validate(list); err != nil {
+	if o.normalize {
+		validator := newValidator(fakectrlruntimeclient.NewFakeClient())
+
+		if err := validator.Validate(profiles); err != nil {
+			logger.WithError(err).Fatal("failed to validate cluster profiles")
+		}
+
+		normalize(profiles)
+
+		if err := writeConfig(o.configPath, profiles); err != nil {
+			logger.WithError(err).Fatal("failed to write cluster profiles")
+		}
+
+		return
+	}
+
+	inClusterConfig, err := util.LoadClusterConfig()
+	if err != nil {
+		logrus.WithError(err).Fatal("failed to load in-cluster config")
+	}
+
+	client, err := ctrlruntimeclient.New(inClusterConfig, ctrlruntimeclient.Options{})
+	if err != nil {
+		logrus.WithError(err).Fatal("failed to create client")
+	}
+
+	validator := newValidator(client)
+
+	if err := validator.Validate(profiles); err != nil {
 		logger.WithError(err).Fatal("failed to validate cluster profiles")
 	}
 
-	if err := validator.checkCiSecrets(); err != nil {
+	normalizedProfiles := profiles.DeepCopy()
+	normalize(*normalizedProfiles)
+
+	if diff := cmp.Diff(&profiles, normalizedProfiles); diff != "" {
+		fmt.Print(diff)
+		logger.Fatal("\nProfiles have not been normalized, run `make check-cluster-profiles`")
+	}
+
+	if err := validator.checkCISecrets(); err != nil {
 		logger.WithError(err).Fatal("failed to validate secrets for cluster profiles")
 	}
 
 	logger.Info("Cluster profiles successfully checked.")
 }
 
-func loadConfig(configPath string) (api.ClusterProfilesList, error) {
-	configContents, err := os.ReadFile(configPath)
+func writeConfig(configPath string, profiles api.ClusterProfilesList) error {
+	bytes, err := yaml.Marshal(&profiles)
 	if err != nil {
-		return api.ClusterProfilesList{}, fmt.Errorf("failed to read cluster profiles config: %w", err)
+		return fmt.Errorf("marshal profiles: %w", err)
 	}
 
-	var profilesList api.ClusterProfilesList
-	if err = yaml.Unmarshal(configContents, &profilesList); err != nil {
-		return api.ClusterProfilesList{}, fmt.Errorf("failed to unmarshall file %s: %w", configPath, err)
+	if err := os.WriteFile(configPath, bytes, 0644); err != nil {
+		return fmt.Errorf("write profiles %q: %w", configPath, err)
 	}
 
-	return profilesList, nil
+	return nil
 }
 
 func (validator *profileValidator) Validate(profiles api.ClusterProfilesList) error {
-	for _, p := range profiles {
-		// Check for duplicate orgs within the profile first
-		orgMap := make(map[string]bool)
+	for _, p := range profiles.ClusterProfiles {
+		// Check for duplicate orgs/tenants
+		tenantMap := sets.New[string]()
+		orgMap := sets.New[string]()
+
 		for _, owner := range p.Owners {
-			if orgMap[owner.Org] {
-				return fmt.Errorf("cluster profile '%v' has duplicate org '%v'", p.Profile, owner.Org)
+			tenant := ""
+			if owner.Konflux != nil {
+				tenant = owner.Konflux.Tenant
 			}
-			orgMap[owner.Org] = true
+
+			if tenant == "" && owner.Org == "" {
+				return fmt.Errorf("cluster profile '%v' has an invalid owner", p.Name)
+			}
+
+			if tenant != "" && owner.Org != "" {
+				return fmt.Errorf("cluster profile '%v' has both org and tenant set", p.Name)
+			}
+
+			if tenant != "" {
+				if tenantMap.Has(tenant) {
+					return fmt.Errorf("cluster profile '%v' has duplicate tenant %q", p.Name, tenant)
+				}
+				tenantMap.Insert(tenant)
+			}
+
+			if owner.Org != "" {
+				if orgMap.Has(owner.Org) {
+					return fmt.Errorf("cluster profile '%v' has duplicate org %q", p.Name, owner.Org)
+				}
+				orgMap.Insert(owner.Org)
+			}
 		}
 
 		// Check if a profile isn't already defined in the config
-		if _, found := validator.profiles[p.Profile]; found {
-			return fmt.Errorf("cluster profile '%v' already exists in the configuration file", p.Profile)
+		if _, found := validator.profiles[p.Name]; found {
+			return fmt.Errorf("cluster profile '%v' already exists in the configuration file", p.Name)
 		}
 
-		validator.profiles[p.Profile] = p
+		validator.profiles[p.Name] = p
 	}
 	return nil
 }
 
-// checkCiSecrets verifies that the secret for each cluster profile exists in the ci namespace
-func (validator *profileValidator) checkCiSecrets() error {
+// checkCISecrets verifies that the secret for each cluster profile exists in the ci namespace
+func (validator *profileValidator) checkCISecrets() error {
 	for p := range validator.profiles {
 		profileDetails, err := server.NewResolverClient(configResolverAddress).ClusterProfile(p.Name())
 		if err != nil {
@@ -129,4 +186,29 @@ func (validator *profileValidator) checkCiSecrets() error {
 		}
 	}
 	return nil
+}
+
+func normalize(profiles api.ClusterProfilesList) {
+	for i := range profiles.ClusterProfiles {
+		profile := &profiles.ClusterProfiles[i]
+		sortOwners(profile.Owners)
+	}
+}
+
+// sortOwners does what follows:
+//   - Sort repos by name.
+//   - Sort owners by org.
+func sortOwners(owners []api.ClusterProfileOwners) {
+	if len(owners) == 0 {
+		return
+	}
+
+	for i := range owners {
+		owner := &owners[i]
+		if len(owner.Repos) > 0 {
+			slices.Sort(owner.Repos)
+		}
+	}
+
+	sort.Slice(owners, func(i, j int) bool { return owners[i].Org < owners[j].Org })
 }

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"reflect"
 	"testing"
 
@@ -341,6 +342,174 @@ func TestInputImageTagStepConfiguration(t *testing.T) {
 				if diff := cmp.Diff(testCase.expectedFormattedSources, testCase.config.FormattedSources()); diff != "" {
 					t.Errorf("Unexpected formatted sources : %v", diff)
 				}
+			}
+		})
+	}
+}
+
+func TestResolveClusterProfileList(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name         string
+		profiles     ClusterProfilesList
+		wantProfiles ClusterProfilesList
+		wantErr      string
+	}{
+		{
+			name: "Resolve cluster groups",
+			profiles: ClusterProfilesList{
+				KonfluxConfig: &ClusterProfileKonfluxConfig{
+					ClusterGroups: map[string][]string{
+						"prod": {"prod_1"},
+						"stg":  {"stg_0"},
+					},
+				},
+				ClusterProfiles: []ClusterProfileDetails{{
+					Name: "aws",
+					Owners: []ClusterProfileOwners{{
+						Konflux: &ClusterProfileKonfluxOwner{
+							Tenant:        "knflx-tenant",
+							ClusterGroups: []string{"prod", "stg"},
+							Clusters:      []string{"dev"},
+						},
+					}},
+				}, {
+					Name: "aws-2",
+					Owners: []ClusterProfileOwners{{
+						Konflux: &ClusterProfileKonfluxOwner{
+							Tenant:   "knflx-tenant-2",
+							Clusters: []string{"dev"},
+						},
+					}},
+				}},
+			},
+			wantProfiles: ClusterProfilesList{
+				KonfluxConfig: &ClusterProfileKonfluxConfig{
+					ClusterGroups: map[string][]string{
+						"prod": {"prod_1"},
+						"stg":  {"stg_0"},
+					},
+				},
+				ClusterProfiles: []ClusterProfileDetails{{
+					Name: "aws",
+					Owners: []ClusterProfileOwners{{
+						Konflux: &ClusterProfileKonfluxOwner{
+							Tenant:        "knflx-tenant",
+							ClusterGroups: []string{"prod", "stg"},
+							Clusters:      []string{"dev", "prod_1", "stg_0"},
+						},
+					}},
+				}, {
+					Name: "aws-2",
+					Owners: []ClusterProfileOwners{{
+						Konflux: &ClusterProfileKonfluxOwner{
+							Tenant:   "knflx-tenant-2",
+							Clusters: []string{"dev"},
+						},
+					}},
+				}},
+			},
+		},
+		{
+			name: "Cluster group does not exist",
+			profiles: ClusterProfilesList{
+				ClusterProfiles: []ClusterProfileDetails{{
+					Name: "aws",
+					Owners: []ClusterProfileOwners{{
+						Konflux: &ClusterProfileKonfluxOwner{
+							Tenant:        "knflx-tenant",
+							ClusterGroups: []string{"foobar"},
+						},
+					}},
+				}},
+			},
+			wantErr: "profiles[0].owners[0] cluster group foobar not found",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			gotErr := tc.profiles.Resolve()
+			if tc.wantErr != "" {
+				if gotErr == nil {
+					t.Fatalf("want err %s but go nil", tc.wantErr)
+				}
+				if tc.wantErr != gotErr.Error() {
+					t.Fatalf("want err %s but go %s", tc.wantErr, gotErr.Error())
+				}
+				return
+			}
+			if gotErr != nil {
+				t.Fatalf("unexpected error: %v", gotErr)
+			}
+
+			if diff := cmp.Diff(tc.wantProfiles, tc.profiles); diff != "" {
+				t.Errorf("unexpected profiles: %s", diff)
+			}
+		})
+	}
+}
+
+func TestUnmarshalClusterProfileSetDetails(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name                         string
+		data                         string
+		wantClusterProfileSetDetails ClusterProfileSetDetails
+	}{
+		{
+			name: "Old schema",
+			data: `{
+		"openshift-org-aws": [
+			"aws",
+			"aws-2",
+			"aws-3",
+			"aws-4",
+			"aws-5"
+			]
+		}`,
+			wantClusterProfileSetDetails: ClusterProfileSetDetails{
+				ClusterProfileSetDetailsNew: ClusterProfileSetDetailsNew{
+					ClusterProfileSets: map[ClusterProfile][]string{
+						"openshift-org-aws": {"aws", "aws-2", "aws-3", "aws-4", "aws-5"},
+					},
+				},
+			},
+		},
+		{
+			name: "New schema",
+			data: `{
+"cluster_profile_sets": {
+	"openshift-org-aws": [
+			"aws",
+			"aws-2",
+			"aws-3",
+			"aws-4",
+			"aws-5"
+		]
+	}
+}`,
+			wantClusterProfileSetDetails: ClusterProfileSetDetails{
+				ClusterProfileSetDetailsNew: ClusterProfileSetDetailsNew{
+					ClusterProfileSets: map[ClusterProfile][]string{
+						"openshift-org-aws": {"aws", "aws-2", "aws-3", "aws-4", "aws-5"},
+					},
+				},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			gotClusterProfileSetDetails := ClusterProfileSetDetails{}
+			if err := json.Unmarshal([]byte(tc.data), &gotClusterProfileSetDetails); err != nil {
+				t.Errorf("fail to unmarshal cluster profile set details: %s", err.Error())
+				return
+			}
+
+			if diff := cmp.Diff(&tc.wantClusterProfileSetDetails, &gotClusterProfileSetDetails); diff != "" {
+				t.Errorf("unexpected cluster profile set details:\n %s", diff)
 			}
 		})
 	}

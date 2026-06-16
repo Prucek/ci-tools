@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -766,6 +767,18 @@ func TestGetPromotionPod(t *testing.T) {
 			namespace: "ci-op-9bdij1f6",
 		},
 		{
+			name:              "promotion-quay-non-release-namespace",
+			stepName:          "promotion-quay",
+			nodeArchitectures: []string{"amd64"},
+			imageMirror: map[string]string{
+				"quay.io/openshift/ci:ocp_4.21_ovn-kubernetes":  "registry.build02.ci.openshift.org/ci-op-y2n8rsh3/pipeline@sha256:aaa",
+				"ocp/4.21-quay:ovn-kubernetes":                  "quay-proxy.ci.openshift.org/openshift/ci@sha256:aaa",
+				"quay.io/openshift/ci:ci_ci_sanitize-prow-jobs": "registry.build02.ci.openshift.org/ci-op-y2n8rsh3/pipeline@sha256:bbb",
+				"ci/ci-quay:sanitize-prow-jobs":                 "quay-proxy.ci.openshift.org/openshift/ci@sha256:bbb",
+			},
+			namespace: "ci-op-9bdij1f6",
+		},
+		{
 			name:              "basic case - arm64 only",
 			stepName:          "promotion",
 			nodeArchitectures: []string{"arm64"},
@@ -789,7 +802,7 @@ func TestGetPromotionPod(t *testing.T) {
 
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			testhelper.CompareWithFixture(t, getPromotionPod(testCase.imageMirror, "20240603235401", testCase.namespace, testCase.stepName, "4.14", testCase.nodeArchitectures))
+			testhelper.CompareWithFixture(t, getPromotionPod(testCase.imageMirror, "20240603235401", testCase.namespace, testCase.stepName, "4.20", testCase.nodeArchitectures))
 		})
 	}
 }
@@ -1014,6 +1027,35 @@ func TestGetImageMirror(t *testing.T) {
 				"registry.ci.openshift.org/ocp/4.22-quay:vertical-pod-autoscaler": "quay-proxy.ci.openshift.org/openshift/ci:ocp_4.22_vertical-pod-autoscaler",
 			},
 		},
+		{
+			name: "tag-only DockerImageReference with image SHA produces digest-anchored source",
+			tags: map[string][]api.ImageStreamTagReference{
+				"ansible": {
+					{Namespace: "ocp", Name: "5.0", Tag: "ansible"},
+				},
+			},
+			pipeline: &imageapi.ImageStream{
+				Status: imageapi.ImageStreamStatus{
+					PublicDockerImageRepository: "registry.build02.ci.openshift.org/ci-op-y2n8rsh3/pipeline",
+					Tags: []imageapi.NamedTagEventList{
+						{
+							Tag: "ansible",
+							Items: []imageapi.TagEvent{
+								{
+									DockerImageReference: "quay-proxy.ci.openshift.org/openshift/ci:ocp_5.0_ansible",
+									Image:                "sha256:aaabbb",
+								},
+							},
+						},
+					},
+				},
+			},
+			registry:   "registry.ci.openshift.org",
+			mirrorFunc: api.DefaultMirrorFunc,
+			expected: map[string]string{
+				"registry.ci.openshift.org/ocp/5.0:ansible": "quay-proxy.ci.openshift.org/openshift/ci@sha256:aaabbb",
+			},
+		},
 	}
 
 	for _, testCase := range testCases {
@@ -1044,6 +1086,85 @@ func TestGetPublicImageReference(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			if actual, expected := getPublicImageReference(testCase.dockerImageReference, testCase.publicDockerImageRepository), testCase.expected; !reflect.DeepEqual(actual, expected) {
 				t.Errorf("%s: got incorrect public image reference: %v", testCase.name, diff.ObjectDiff(actual, expected))
+			}
+		})
+	}
+}
+
+func TestGetResolveAndTagRetryShell(t *testing.T) {
+	regcfg := "/etc/push-secret/.dockerconfigjson"
+	proxyTag := "quay-proxy.ci.openshift.org/openshift/ci:ocp_4.21_ovn-kubernetes"
+	isTag := "ocp/4.21-quay:ovn-kubernetes"
+	got := getResolveAndTagRetryShell(regcfg, proxyTag, isTag, 2, "linux/amd64")
+
+	for _, sub := range []string{
+		"for r in {1..5}",
+		"oc image info --registry-config=" + regcfg + " --filter-by-os=linux/amd64 " + proxyTag,
+		"oc tag --source=docker --loglevel=2 --reference-policy='source' --import-mode='PreserveOriginal' --reference quay-proxy.ci.openshift.org/openshift/ci@${_digest} " + isTag,
+		"promotion-quay: digest-tag failed for " + isTag,
+		"promotion-quay: retrying digest-tag for " + isTag,
+		`[ "${r}" -eq 5 ]`,
+		"exit 1",
+		"$(($RANDOM % 120))",
+		`sleep "${backoff}"`,
+	} {
+		if !strings.Contains(got, sub) {
+			t.Fatalf("missing substring %q in:\n%s", sub, got)
+		}
+	}
+}
+
+func TestQuayProxyTagFromISKey(t *testing.T) {
+	tests := []struct {
+		name     string
+		isTagKey string
+		wantTag  string
+		wantOK   bool
+	}{
+		{
+			name:     "standard ocp stream",
+			isTagKey: "ocp/4.21-quay:ovn-kubernetes",
+			wantTag:  "quay-proxy.ci.openshift.org/openshift/ci:ocp_4.21_ovn-kubernetes",
+			wantOK:   true,
+		},
+		{
+			name:     "5.0 stream",
+			isTagKey: "ocp/5.0-quay:ansible",
+			wantTag:  "quay-proxy.ci.openshift.org/openshift/ci:ocp_5.0_ansible",
+			wantOK:   true,
+		},
+		{
+			name:     "hyphenated tag",
+			isTagKey: "ocp/4.21-quay:ovn-kubernetes-base",
+			wantTag:  "quay-proxy.ci.openshift.org/openshift/ci:ocp_4.21_ovn-kubernetes-base",
+			wantOK:   true,
+		},
+		{
+			name:     "template component not a concrete IS key",
+			isTagKey: "ci/ci-quay:${component}",
+			wantTag:  "quay-proxy.ci.openshift.org/openshift/ci:ci_ci_${component}",
+			wantOK:   true,
+		},
+		{
+			name:     "no slash",
+			isTagKey: "ocp-4.21-quay:ovn-kubernetes",
+			wantOK:   false,
+		},
+		{
+			name:     "no -quay: suffix",
+			isTagKey: "ocp/4.21:ovn-kubernetes",
+			wantOK:   false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := quayProxyTagFromISKey(tt.isTagKey)
+			if ok != tt.wantOK {
+				t.Errorf("quayProxyTagFromISKey(%q) ok = %v, want %v", tt.isTagKey, ok, tt.wantOK)
+				return
+			}
+			if ok && got != tt.wantTag {
+				t.Errorf("quayProxyTagFromISKey(%q) = %q, want %q", tt.isTagKey, got, tt.wantTag)
 			}
 		})
 	}

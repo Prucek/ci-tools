@@ -61,8 +61,8 @@ func TestDetector_extractToolName(t *testing.T) {
 		},
 		{
 			name:     "tool with subdirectory",
-			pkgPath:  "github.com/openshift/ci-tools/cmd/branchingconfigmanagers/bugzilla-config-manager",
-			expected: "bugzilla-config-manager",
+			pkgPath:  "github.com/openshift/ci-tools/cmd/branchingconfigmanagers/fast-forwarding-config-manager",
+			expected: "fast-forwarding-config-manager",
 		},
 		{
 			name:     "not a cmd package",
@@ -741,6 +741,135 @@ func TestExtractBeforeSHAFromCompareURL(t *testing.T) {
 				if sha != tt.expectedSHA {
 					t.Errorf("expected SHA %q, got %q", tt.expectedSHA, sha)
 				}
+			}
+		})
+	}
+}
+
+func TestParseForcedImagesFromCommitMessages(t *testing.T) {
+	allowed := sets.New("pod-scaler", "pr-reminder", "pipeline-controller")
+
+	tests := []struct {
+		name           string
+		messages       []string
+		expectedForced sets.Set[string]
+		expectedAll    bool
+	}{
+		{
+			name: "single image directive",
+			messages: []string{
+				`commit title
+
+/image pod-scaler`,
+			},
+			expectedForced: sets.New("pod-scaler"),
+		},
+		{
+			name: "multiple image directive",
+			messages: []string{
+				`commit title
+
+/image pod-scaler pr-reminder`,
+			},
+			expectedForced: sets.New("pod-scaler", "pr-reminder"),
+		},
+		{
+			name: "all directive builds everything",
+			messages: []string{
+				`commit title
+
+/image all`,
+			},
+			expectedForced: sets.New("pod-scaler", "pr-reminder", "pipeline-controller"),
+			expectedAll:    true,
+		},
+		{
+			name: "unknown images are ignored",
+			messages: []string{
+				`commit title
+
+/image pod-scaler missing-image`,
+			},
+			expectedForced: sets.New("pod-scaler"),
+		},
+		{
+			name: "must start at beginning of line",
+			messages: []string{
+				`commit title
+
+some context /image pod-scaler
+ /image pr-reminder`,
+			},
+			expectedForced: sets.New[string](),
+		},
+		{
+			name: "supports only singular command",
+			messages: []string{
+				`commit title
+
+/images pod-scaler`,
+			},
+			expectedForced: sets.New[string](),
+		},
+		{
+			name: "collects directives across multiple commits",
+			messages: []string{
+				`commit one
+
+/image pod-scaler`,
+				`commit two
+
+/image pr-reminder`,
+			},
+			expectedForced: sets.New("pod-scaler", "pr-reminder"),
+		},
+		{
+			name: "/image with no arguments has no effect",
+			messages: []string{
+				`commit title
+
+/image`,
+			},
+			expectedForced: sets.New[string](),
+		},
+		{
+			name: "/image with trailing whitespace only has no effect",
+			messages: []string{
+				"commit title\n\n/image   ",
+			},
+			expectedForced: sets.New[string](),
+		},
+		{
+			name:           "empty commit message",
+			messages:       []string{""},
+			expectedForced: sets.New[string](),
+		},
+		{
+			name: "CRLF line endings",
+			messages: []string{
+				"commit title\r\n\r\n/image pod-scaler\r\n",
+			},
+			expectedForced: sets.New("pod-scaler"),
+		},
+		{
+			name: "mixed valid and invalid on one line keeps valid ones",
+			messages: []string{
+				`commit title
+
+/image pod-scaler bad-name pr-reminder also-bad`,
+			},
+			expectedForced: sets.New("pod-scaler", "pr-reminder"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			forced, all := parseForcedImagesFromCommitMessages(tt.messages, allowed)
+			if diff := cmp.Diff(tt.expectedForced, forced); diff != "" {
+				t.Fatalf("forced images mismatch (-want +got):\n%s", diff)
+			}
+			if all != tt.expectedAll {
+				t.Fatalf("expected all=%v, got %v", tt.expectedAll, all)
 			}
 		})
 	}

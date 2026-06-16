@@ -457,38 +457,38 @@ func constructDockerConfigJSONFromVault(client secrets.ReadOnlyClient, dockerCon
 }
 
 // constructDockerConfigJSONFromGSM constructs a .dockerconfigjson from GSM secrets cache
-func constructDockerConfigJSONFromGSM(secretsCache map[gsmSecretRef]fetchedSecret, registries []api.RegistryAuthData) ([]byte, error) {
+func constructDockerConfigJSONFromGSM(secretsCache map[gsmSecretRef]fetchedSecret, registries []api.RegistryAuthData, gsmDPTPCollection string) ([]byte, error) {
 	auths := make(map[string]secretbootstrap.DockerAuth)
 
 	for _, reg := range registries {
 		authData := secretbootstrap.DockerAuth{}
 
 		authRef := gsmSecretRef{
-			collection: reg.Collection,
+			collection: gsmDPTPCollection,
 			group:      reg.Group,
 			field:      reg.AuthField,
 		}
 		fetchedAuth, exists := secretsCache[authRef]
 		if !exists {
-			return nil, fmt.Errorf("auth field '%s' (collection: %s, group: %s) not found in fetched secrets", reg.AuthField, reg.Collection, reg.Group)
+			return nil, fmt.Errorf("auth field '%s' (collection: %s, group: %s) not found in fetched secrets", reg.AuthField, gsmDPTPCollection, reg.Group)
 		}
 		if fetchedAuth.err != nil {
-			return nil, fmt.Errorf("couldn't get auth field '%s' (collection: %s, group: %s): %w", reg.AuthField, reg.Collection, reg.Group, fetchedAuth.err)
+			return nil, fmt.Errorf("couldn't get auth field '%s' (collection: %s, group: %s): %w", reg.AuthField, gsmDPTPCollection, reg.Group, fetchedAuth.err)
 		}
 		authData.Auth = string(bytes.TrimSpace(fetchedAuth.payload))
 
 		if reg.EmailField != "" {
 			emailRef := gsmSecretRef{
-				collection: reg.Collection,
+				collection: gsmDPTPCollection,
 				group:      reg.Group,
 				field:      reg.EmailField,
 			}
 			fetchedEmail, exists := secretsCache[emailRef]
 			if !exists {
-				return nil, fmt.Errorf("email field '%s' (collection: %s, group: %s) not found in fetched secrets", reg.EmailField, reg.Collection, reg.Group)
+				return nil, fmt.Errorf("email field '%s' (collection: %s, group: %s) not found in fetched secrets", reg.EmailField, gsmDPTPCollection, reg.Group)
 			}
 			if fetchedEmail.err != nil {
-				return nil, fmt.Errorf("couldn't get email field '%s' (collection: %s, group: %s): %w", reg.EmailField, reg.Collection, reg.Group, fetchedEmail.err)
+				return nil, fmt.Errorf("couldn't get email field '%s' (collection: %s, group: %s): %w", reg.EmailField, gsmDPTPCollection, reg.Group, fetchedEmail.err)
 			}
 			authData.Email = string(fetchedEmail.payload)
 		}
@@ -802,9 +802,23 @@ func updateSecrets(getters map[string]Getter, secretsMap map[string][]*coreapi.S
 
 				if !shouldCreate {
 					differentData := !equality.Semantic.DeepEqual(secret.Data, existingSecret.Data)
+					var addedKeys, changedKeys, removedKeys []string
+					for k, value := range secret.Data {
+						if existingValue, ok := existingSecret.Data[k]; !ok {
+							addedKeys = append(addedKeys, k)
+						} else if !equality.Semantic.DeepEqual(value, existingValue) {
+							changedKeys = append(changedKeys, k)
+						}
+					}
+					for k := range existingSecret.Data {
+						if _, ok := secret.Data[k]; !ok {
+							removedKeys = append(removedKeys, k)
+						}
+					}
+					change := fmt.Sprintf("added: %v, changed: %v, removed: %v", addedKeys, changedKeys, removedKeys)
 					if !force && differentData {
 						logger.Errorf("actual secret data differs the expected")
-						errs = append(errs, fmt.Errorf("secret %s:%s/%s needs updating in place, use --force to do so", cluster, secret.Namespace, secret.Name))
+						errs = append(errs, fmt.Errorf("secret %s:%s/%s needs updating in place (%s), use --force to do so", cluster, secret.Namespace, secret.Name, change))
 						continue
 					}
 					if existingSecret.Labels == nil || existingSecret.Labels[api.DPTPRequesterLabel] != "ci-secret-bootstrap" || differentData {
@@ -812,7 +826,7 @@ func updateSecrets(getters map[string]Getter, secretsMap map[string][]*coreapi.S
 							errs = append(errs, fmt.Errorf("error updating secret %s:%s/%s: %w", cluster, secret.Namespace, secret.Name, err))
 							continue
 						}
-						logger.Debug("secret updated")
+						logger.Debugf("secret updated %s", change)
 					} else {
 						logger.Debug("secret skipped")
 					}
@@ -1361,7 +1375,7 @@ func constructSecretsFromGSM(
 		}
 		for _, registryEntry := range bundle.DockerConfig.Registries {
 			s := gsmSecretRef{
-				collection: registryEntry.Collection,
+				collection: gsmConfig.DPTPCollection,
 				group:      registryEntry.Group,
 				field:      registryEntry.AuthField,
 			}
@@ -1369,7 +1383,7 @@ func constructSecretsFromGSM(
 
 			if registryEntry.EmailField != "" {
 				s := gsmSecretRef{
-					collection: registryEntry.Collection,
+					collection: gsmConfig.DPTPCollection,
 					group:      registryEntry.Group,
 					field:      registryEntry.EmailField,
 				}
@@ -1482,7 +1496,7 @@ func constructSecretsFromGSM(
 		}
 
 		if bundle.DockerConfig != nil {
-			dockerConfigData, err := constructDockerConfigJSONFromGSM(fetchedGsmSecretsMap, bundle.DockerConfig.Registries)
+			dockerConfigData, err := constructDockerConfigJSONFromGSM(fetchedGsmSecretsMap, bundle.DockerConfig.Registries, gsmConfig.DPTPCollection)
 			if err != nil {
 				logrus.WithError(err).Errorf("skipping bundle %s: failed to construct dockerconfig", bundle.Name)
 				errs = append(errs, fmt.Errorf("bundle %s: failed to construct dockerconfig: %w", bundle.Name, err))

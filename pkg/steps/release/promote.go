@@ -242,6 +242,77 @@ func getTagCommand(tagSpecs []string, loglevel int) string {
 		loglevel, strings.Join(tagSpecs, " "))
 }
 
+// quayProxyTagFromISKey derives the quay-proxy image tag from an IS tag key of the form
+// "namespace/streamname-quay:tag", which is the format produced by getQuayProxyTarget when
+// ImageStreamTagReference.Name is non-empty (the standard ocp promotion case).
+// Example: "ocp/4.21-quay:ovn-kubernetes" → "quay-proxy.ci.openshift.org/openshift/ci:ocp_4.21_ovn-kubernetes".
+//
+// The stream segment must end with "-quay"; we split namespace/stream from tag using the last ":" in
+// the segment after "/". Using strings.Index(rest, "-quay:") is wrong when the promotion Name (stream
+// base before "-quay") itself contains "-quay", e.g. "something-quay-operator-quay:component".
+func quayProxyTagFromISKey(isTagKey string) (string, bool) {
+	slashIdx := strings.Index(isTagKey, "/")
+	if slashIdx == -1 {
+		return "", false
+	}
+	namespace := isTagKey[:slashIdx]
+	rest := isTagKey[slashIdx+1:]
+	lastColon := strings.LastIndex(rest, ":")
+	if lastColon == -1 {
+		return "", false
+	}
+	streamPart := rest[:lastColon]
+	tag := rest[lastColon+1:]
+	if namespace == "" || streamPart == "" || tag == "" {
+		return "", false
+	}
+	const quayStreamSuffix = "-quay"
+	if !strings.HasSuffix(streamPart, quayStreamSuffix) {
+		return "", false
+	}
+	streamName := strings.TrimSuffix(streamPart, quayStreamSuffix)
+	if streamName == "" {
+		return "", false
+	}
+	return fmt.Sprintf("%s/openshift/ci:%s_%s_%s", api.QCIAPPCIDomain, namespace, streamName, tag), true
+}
+
+// promotionCLIImageInfoFilterOS returns the --filter-by-os value matching the promotion pod's
+// node architecture (amd64 vs arm64-only) so oc image info resolves one digest for manifest lists.
+func promotionCLIImageInfoFilterOS(nodeArchitectures []string) string {
+	archs := sets.New[string](nodeArchitectures...)
+	if !archs.Has("amd64") && archs.Has("arm64") {
+		return "linux/arm64"
+	}
+	return "linux/amd64"
+}
+
+const quayPromotionDigestTagAttempts = 5
+
+// getResolveAndTagRetryShell resolves quay-proxy digest via oc image info and oc tags the IST; retries when QCI moves after mirror.
+func getResolveAndTagRetryShell(registryConfig, quayProxyTag, isTag string, loglevel int, filterByOS string) string {
+	repo := quayProxyTag[:strings.LastIndex(quayProxyTag, ":")]
+	n := quayPromotionDigestTagAttempts
+	return fmt.Sprintf(`for r in {1..%d}; do
+  _digest=$(oc image info --registry-config=%s --filter-by-os=%s %s | sed -n '/^Digest:[[:space:]]/s/^Digest:[[:space:]]*//p' | head -n1)
+  if [ -n "${_digest}" ] && oc tag --source=docker --loglevel=%d --reference-policy='source' --import-mode='PreserveOriginal' --reference %s@${_digest} %s; then
+    break
+  fi
+  echo "promotion-quay: digest-tag failed for %s attempt ${r}/%d (QCI digest may have moved after mirror)" >&2
+  if [ "${r}" -eq %d ]; then
+    exit 1
+  fi
+  echo "promotion-quay: retrying digest-tag for %s (attempt $((r+1))/%d after randomized backoff)" >&2
+  backoff=$(($RANDOM %% %d))s
+  sleep "${backoff}"
+done
+`, n, registryConfig, filterByOS, quayProxyTag, loglevel, repo, isTag,
+		isTag, n,
+		n,
+		isTag, n,
+		120)
+}
+
 const (
 	retryLoopTemplate    = "for r in {1..%d}; do echo %s; %s && break; %s; done"
 	retryLoopWithBackoff = "backoff=$(($RANDOM % 120))s; echo Sleeping randomized $backoff before retry; sleep $backoff"
@@ -257,17 +328,40 @@ func getPromotionPod(imageMirrorTarget map[string]string, timeStr string, namesp
 	var images []string
 	var pruneImages []string
 	var tags []string
+	// resolveAndTagPairs holds [quayProxyTag, isTag] for concrete *-quay IS targets in a
+	// quay promotion step. These are handled post-mirror via oc image info + oc tag so
+	// that spec.from always carries the exact QCI manifest digest rather than a floating tag.
+	// Non-release namespaces use oc tag directly.
+	var resolveAndTagPairs [][2]string
+
+	isQuayStep := name == api.PromotionQuayStepName
 
 	for _, k := range keys {
 		if strings.Contains(k, fmt.Sprintf("%s_prune_", timeStr)) {
 			pruneImages = append(pruneImages, fmt.Sprintf("%s=%s", imageMirrorTarget[k], k))
 		} else {
-			// Detect based on target format: quay-proxy targets should be tagged, others mirrored
-			if strings.Contains(k, "-quay:") || strings.Contains(k, "${component}") {
-				tags = append(tags, fmt.Sprintf("%s %s", imageMirrorTarget[k], k))
+			src := imageMirrorTarget[k]
+			if strings.HasPrefix(k, api.QuayOpenShiftCIRepo+":") {
+				// Images promoted into quay.io/openshift/ci always use oc image mirror (tag or digest sources).
+				images = append(images, fmt.Sprintf("%s=%s", src, k))
+			} else if isQuayStep && !strings.Contains(k, api.ComponentFormatReplacement) {
+				// Concrete quay IS target: resolve the QCI digest after mirroring instead of
+				// using a pre-computed (potentially tag-only) source so spec.from is always digest-based.
+				// Non-release namespaces use oc tag directly.
+				quayProxyTag, ok := quayProxyTagFromISKey(k)
+				if ok {
+					ns := k[:strings.Index(k, "/")]
+					if api.RefersToOfficialImage(ns, api.WithOKD) {
+						resolveAndTagPairs = append(resolveAndTagPairs, [2]string{quayProxyTag, k})
+						continue
+					}
+				}
+				tags = append(tags, fmt.Sprintf("%s %s", src, k))
+			} else if strings.Contains(k, api.ComponentFormatReplacement) || !strings.Contains(src, "@sha256:") || strings.Contains(src, api.QCIAPPCIDomain) {
+				// Cluster ImageStream tags: oc tag for non-digest sources, quay-proxy imports, or ${component} templates.
+				tags = append(tags, fmt.Sprintf("%s %s", src, k))
 			} else {
-				// Default to mirroring for quay.io targets and other registries
-				images = append(images, fmt.Sprintf("%s=%s", imageMirrorTarget[k], k))
+				images = append(images, fmt.Sprintf("%s=%s", src, k))
 			}
 		}
 	}
@@ -283,27 +377,33 @@ func getPromotionPod(imageMirrorTarget map[string]string, timeStr string, namesp
 		commands = append(commands, mirrorCommand)
 	}
 
-	// Generate tag commands if there are tags to create
-	if len(tags) > 0 {
-		isQuayPromotion := name == api.PromotionQuayStepName
-		if isQuayPromotion {
-			// For quay promotion, try all tags together first (fastest path), then fallback to individual for partial success
-			tagCommands := []string{"set +e"}
-			// Try all at once first (1-2 attempts for fastest path)
+	// Generate tag/resolve-and-tag commands.
+	if isQuayStep && (len(tags) > 0 || len(resolveAndTagPairs) > 0) {
+		// Quay promotion: run under set +e so one failure does not block the rest.
+		tagCommands := []string{"set +e"}
+
+		// Template-based IS tags (contain ${component}): batch-then-individual retry, unchanged.
+		if len(tags) > 0 {
 			singleCmd := fmt.Sprintf(retryLoopTemplate, 2, "'Tag attempt $r (all together)'", getTagCommand(tags, 2), ":")
 			tagCommands = append(tagCommands, singleCmd)
-			// If that fails, try individually for partial success
 			for _, tagPair := range tags {
 				individualCmd := fmt.Sprintf(retryLoopTemplate, 3, "'Tag attempt $r (individual)'", getTagCommand([]string{tagPair}, 2), retryLoopWithBackoff)
 				tagCommands = append(tagCommands, individualCmd)
 			}
-			tagCommands = append(tagCommands, "set -e")
-			commands = append(commands, strings.Join(tagCommands, "\n"))
-		} else {
-			// For regular promotion, use the original retry logic
-			tagCommand := fmt.Sprintf(retryLoopTemplate, 5, "Tag attempt $r", getTagCommand(tags, 2), retryLoopWithBackoff)
-			commands = append(commands, tagCommand)
 		}
+
+		// Concrete *-quay IS targets: resolve QCI digest post-mirror, then tag.
+		for _, pair := range resolveAndTagPairs {
+			quayProxyTag, isTag := pair[0], pair[1]
+			tagCommands = append(tagCommands, getResolveAndTagRetryShell(registryConfig, quayProxyTag, isTag, 2, promotionCLIImageInfoFilterOS(nodeArchitectures)))
+		}
+
+		tagCommands = append(tagCommands, "set -e")
+		commands = append(commands, strings.Join(tagCommands, "\n"))
+	} else if len(tags) > 0 {
+		// For regular promotion, use the original retry logic
+		tagCommand := fmt.Sprintf(retryLoopTemplate, 5, "Tag attempt $r", getTagCommand(tags, 2), retryLoopWithBackoff)
+		commands = append(commands, tagCommand)
 	}
 
 	var args []string
@@ -323,7 +423,7 @@ func getPromotionPod(imageMirrorTarget map[string]string, timeStr string, namesp
 
 	archs := sets.New[string](nodeArchitectures...)
 	if !archs.Has("amd64") && archs.Has("arm64") {
-		image = fmt.Sprintf("%s/%s/4.14:cli", api.DomainForService(api.ServiceRegistry), "ocp-arm64")
+		image = fmt.Sprintf("%s/%s/%s:cli", api.DomainForService(api.ServiceRegistry), "ocp-arm64", cliVersion)
 		nodeSelector = map[string]string{"kubernetes.io/arch": "arm64"}
 	}
 
@@ -343,10 +443,10 @@ func getPromotionPod(imageMirrorTarget map[string]string, timeStr string, namesp
 					Command: command,
 					Args:    args,
 					Env: []coreapi.EnvVar{
-						{
-							Name:  "KUBECONFIG",
-							Value: "/etc/app-ci-kubeconfig/kubeconfig",
-						},
+						// Discovery cache only: without KUBECACHEDIR, client-go defaults to $HOME/.kube/cache; with no
+						// writable HOME in the container that becomes /.kube and logs many INFO lines ("permission denied").
+						{Name: "KUBECONFIG", Value: "/etc/app-ci-kubeconfig/kubeconfig"},
+						{Name: "KUBECACHEDIR", Value: "/tmp/.kube/cache"},
 					},
 					VolumeMounts: []coreapi.VolumeMount{
 						{
@@ -381,7 +481,10 @@ func getPromotionPod(imageMirrorTarget map[string]string, timeStr string, namesp
 }
 
 // findDockerImageReference returns DockerImageReference, the string that can be used to pull this image,
-// to a tag if it exists in the ImageStream's Spec
+// to a tag if it exists in the ImageStream's Spec.
+// When the recorded DockerImageReference is tag-only (no digest) but the status item
+// carries a sha256 image ID, a digest-anchored pullspec is returned instead so that
+// callers can always pin to the exact image (e.g. qciPullSpec can always succeed).
 func findDockerImageReference(is *imagev1.ImageStream, tag string) string {
 	for _, t := range is.Status.Tags {
 		if t.Tag != tag {
@@ -390,7 +493,13 @@ func findDockerImageReference(is *imagev1.ImageStream, tag string) string {
 		if len(t.Items) == 0 {
 			return ""
 		}
-		return t.Items[0].DockerImageReference
+		ref := t.Items[0].DockerImageReference
+		if !strings.Contains(ref, "@sha256:") && strings.HasPrefix(t.Items[0].Image, "sha256:") {
+			if idx := strings.LastIndex(ref, ":"); idx != -1 {
+				return ref[:idx] + "@" + t.Items[0].Image
+			}
+		}
+		return ref
 	}
 	return ""
 }

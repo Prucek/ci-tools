@@ -153,6 +153,9 @@ func newServer(ctx context.Context,
 }
 
 func (s *server) handleIssueComment(l *logrus.Entry, ic github.IssueCommentEvent) {
+	if ic.Action != github.IssueCommentActionCreated {
+		return
+	}
 	if strings.HasPrefix(ic.Comment.Body, testwithPrefix) {
 		l.Infof("handling comment: %s", ic.Comment.Body)
 		_, err := s.handle(l, ic)
@@ -355,8 +358,7 @@ func (s *server) generateProwJob(jr jobRun) (*prowv1.ProwJob, error) {
 			test.Timeout.Duration = defaultMultiRefJobTimeout
 		}
 
-		fakeProwgenInfo := &prowgen.ProwgenInfo{Metadata: testJobMetadata}
-		jobBaseGen := prowgen.NewProwJobBaseBuilderForTest(ciopConfig, fakeProwgenInfo, prowgen.NewCiOperatorPodSpecGenerator(), test)
+		jobBaseGen := prowgen.NewProwJobBaseBuilderForTest(ciopConfig, &testJobMetadata, prowgen.NewCiOperatorPodSpecGenerator(), test)
 		jobBaseGen.PodSpec.Add(prowgen.InjectTestFrom(&jr.JobMetadata))
 		jobBaseGen.PodSpec.Add(prowgen.CustomHashInput(jobName))
 
@@ -375,7 +377,7 @@ func (s *server) generateProwJob(jr jobRun) (*prowv1.ProwJob, error) {
 		}
 		jobBaseGen.Cluster(api.Cluster(cluster))
 
-		periodic = prowgen.GeneratePeriodicForTest(jobBaseGen, fakeProwgenInfo)
+		periodic = prowgen.GeneratePeriodicForTest(jobBaseGen, &testJobMetadata)
 		break
 	}
 	if periodic == nil {

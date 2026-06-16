@@ -1,15 +1,20 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
+	aggerrs "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
 	prowv1 "sigs.k8s.io/prow/pkg/apis/prowjobs/v1"
 	prowconfig "sigs.k8s.io/prow/pkg/config"
 	"sigs.k8s.io/prow/pkg/repoowners"
 
 	imagev1 "github.com/openshift/api/image/v1"
+
+	utilregexp "github.com/openshift/ci-tools/pkg/util/regexp"
 )
 
 const (
@@ -24,8 +29,35 @@ func IsPromotionJob(jobLabels map[string]string) bool {
 	return ok
 }
 
+var (
+	DefaultSlackReporterJobStatesToReport = []prowv1.ProwJobState{
+		prowv1.SuccessState,
+		prowv1.FailureState,
+		prowv1.ErrorState,
+	}
+)
+
+type SlackReporterConfig struct {
+	Channel           string                `json:"channel"`
+	JobStatesToReport []prowv1.ProwJobState `json:"job_states_to_report,omitempty"`
+	ReportTemplate    string                `json:"report_template,omitempty"`
+	// ReportPresubmit controls whether the presubmit job generated from a
+	// periodic test with `presubmit: true` also gets this slack config.
+	// Only valid when the test has `presubmit: true`.
+	ReportPresubmit bool `json:"report_presubmit,omitempty"`
+}
+
 type ProwgenOverrides struct {
-	DisableRehearsals bool `json:"disable_rehearsals,omitempty"`
+	DisableRehearsals           bool `json:"disable_rehearsals,omitempty"`
+	SkipOperatorPresubmits      bool `json:"skip_operator_presubmits,omitempty"`
+	EnableSecretsStoreCSIDriver bool `json:"enable_secrets_store_csi_driver,omitempty"`
+	// Private indicates that generated jobs should be marked as hidden
+	// from display in deck and that they should mount appropriate git credentials
+	// to clone the repository under test.
+	Private bool `json:"private,omitempty"`
+	// Expose declares that jobs should not be hidden from view in deck if they
+	// are private. This field has no effect if private is not set.
+	Expose bool `json:"expose,omitempty"`
 }
 
 // ReleaseBuildConfiguration describes how release
@@ -873,6 +905,12 @@ type TestStepConfiguration struct {
 	// Only applicable to presubmits and periodics
 	ShardCount *int `json:"shard_count,omitempty"`
 
+	// MaxConcurrency sets the maximum number of this job running concurrently. 0 means no limit.
+	MaxConcurrency int `json:"max_concurrency,omitempty"`
+
+	// SlackReporterConfig configures Slack notifications for this test's generated jobs.
+	SlackReporterConfig *SlackReporterConfig `json:"reporter_config,omitempty"`
+
 	// Only one of the following can be not-null.
 	ContainerTestConfiguration         *ContainerTestConfiguration         `json:"container,omitempty"`
 	MultiStageTestConfiguration        *MultiStageTestConfiguration        `json:"steps,omitempty"`
@@ -1146,7 +1184,7 @@ type CredentialReference struct {
 	// MountPath is where the secret should be mounted.
 	MountPath string `json:"mount_path"`
 	// Namespace is where the source secret exists.
-	Namespace string `json:"namespace"`
+	Namespace string `json:"namespace,omitempty"`
 	// Name is the name of the secret.
 	Name string `json:"name,omitempty"`
 }
@@ -1419,6 +1457,7 @@ const (
 	ClusterProfileAzureMagQE              ClusterProfile = "azuremag-qe"
 	ClusterProfileAzureSustAutoRel412     ClusterProfile = "azure-sustaining-autorelease-412"
 	ClusterProfileAzureConfidentialQE     ClusterProfile = "azure-confidential-qe"
+	ClusterProfileAzurePerfScaleQE        ClusterProfile = "azure-perfscale-qe"
 	ClusterProfileAzureCNVDevOps          ClusterProfile = "azure-cnv-devops"
 	ClusterProfileEquinixOcpMetal         ClusterProfile = "equinix-ocp-metal"
 	ClusterProfileEquinixOcpMetalQE       ClusterProfile = "equinix-ocp-metal-qe"
@@ -1640,6 +1679,7 @@ func ClusterProfiles() []ClusterProfile {
 		ClusterProfileAzureStackQE,
 		ClusterProfileAzureSustAutoRel412,
 		ClusterProfileAzureConfidentialQE,
+		ClusterProfileAzurePerfScaleQE,
 		ClusterProfileAzureCNVDevOps,
 		ClusterProfileEquinixOcpMetal,
 		ClusterProfileEquinixOcpMetalQE,
@@ -1884,6 +1924,7 @@ func (p ClusterProfile) ClusterType() string {
 		ClusterProfileAzureSustAutoRel412,
 		ClusterProfileAzureQUAYQE,
 		ClusterProfileAzureConfidentialQE,
+		ClusterProfileAzurePerfScaleQE,
 		ClusterProfileAzureCNVDevOps,
 		ClusterProfileAzureVirtualization,
 		ClusterProfileAzureOADPQE:
@@ -2234,6 +2275,8 @@ func (p ClusterProfile) LeaseType() string {
 		return "azure-sustaining-autorelease-412-quota-slice"
 	case ClusterProfileAzureConfidentialQE:
 		return "azure-confidential-qe-quota-slice"
+	case ClusterProfileAzurePerfScaleQE:
+		return "azure-perfscale-qe-quota-slice"
 	case ClusterProfileAzureCNVDevOps:
 		return "azure-cnv-devops-quota-slice"
 	case ClusterProfileEquinixOcpMetal:
@@ -2567,6 +2610,14 @@ func LeaseTypeFromClusterType(t string) (string, error) {
 	}
 }
 
+func ClusterProfileFromParams(params Parameters) (ClusterProfile, error) {
+	if params == nil {
+		return "", nil
+	}
+	cp, err := params.Get(ClusterProfileParam)
+	return ClusterProfile(cp), err
+}
+
 // ClusterTestConfiguration describes a test that provisions
 // a cluster and runs a command in it.
 type ClusterTestConfiguration struct {
@@ -2768,6 +2819,9 @@ type ImageConfiguration struct {
 	// The image name (To field) should match the cmd tool name for this to work correctly.
 	BuildIfAffected bool `json:"build_if_affected,omitempty"`
 
+	// SlackReporterConfig configures Slack notifications for the auto-generated images jobs.
+	SlackReporterConfig *SlackReporterConfig `json:"reporter_config,omitempty"`
+
 	// Items is the list of images to build.
 	Items []ProjectDirectoryImageBuildStepConfiguration `json:"items,omitempty"`
 }
@@ -2790,10 +2844,15 @@ type ProjectDirectoryImageBuildStepConfiguration struct {
 	MultiArch bool `json:"multi_arch,omitempty"`
 
 	// AdditionalArchitectures is a list of additional architectures to build for. AMD64 architecture is included by default.
+	// DEPRECATED: use Capabilities instead
 	AdditionalArchitectures []string `json:"additional_architectures,omitempty"`
 
 	// Ref is an optional string linking to the extra_ref in "org.repo" format that this belongs to
 	Ref string `json:"ref,omitempty"`
+
+	// Capabilities is the list of strings that
+	// define additional capabilities needed by the image build jobs
+	Capabilities []string `json:"capabilities,omitempty"`
 
 	// isBundleImage indicates that this build step is a bundle image
 	isBundleImage bool
@@ -2812,6 +2871,33 @@ func (p *ProjectDirectoryImageBuildStepConfiguration) IsBundleImage() bool {
 func (p *ProjectDirectoryImageBuildStepConfiguration) WithBundleImage(isBundleImage bool) *ProjectDirectoryImageBuildStepConfiguration {
 	p.isBundleImage = isBundleImage
 	return p
+}
+
+// ValidArchitectures is the set of supported architecture strings for image builds.
+var ValidArchitectures = sets.New[string](
+	"amd64",   // x86-64
+	"arm64",   // AArch64
+	"ppc64le", // PowerPC 64-bit Little Endian
+	"s390x",   // IBM System z 64-bit
+)
+
+// AllCapabilities returns the deduplicated, sorted union of Capabilities and
+// AdditionalArchitectures. Both fields are treated as equivalent during the
+// transition period while AdditionalArchitectures is being phased out.
+func (p *ProjectDirectoryImageBuildStepConfiguration) AllCapabilities() []string {
+	return sets.List(sets.New[string](append(p.Capabilities, p.AdditionalArchitectures...)...))
+}
+
+// ArchitectureCapabilities returns the subset of AllCapabilities that are valid
+// architecture strings (e.g. "arm64", "ppc64le").
+func (p *ProjectDirectoryImageBuildStepConfiguration) ArchitectureCapabilities() []string {
+	var arches []string
+	for _, c := range p.AllCapabilities() {
+		if ValidArchitectures.Has(c) {
+			arches = append(arches, c)
+		}
+	}
+	return arches
 }
 
 // ProjectDirectoryImageBuildInputs holds inputs for an image build from the repo under test
@@ -2956,23 +3042,149 @@ func (m *MetadataWithTest) JobName(prefix string) string {
 	return m.Metadata.JobName(prefix, m.Test)
 }
 
-type ClusterProfilesList []ClusterProfileDetails
+type ClusterProfileKonfluxConfig struct {
+	ClusterGroups map[string][]string `yaml:"cluster_groups,omitempty" json:"cluster_groups,omitempty"`
+}
+
+type ClusterProfilesList struct {
+	KonfluxConfig   *ClusterProfileKonfluxConfig `yaml:"konflux,omitempty" json:"konflux,omitempty"`
+	ClusterProfiles []ClusterProfileDetails      `yaml:"cluster_profiles,omitempty" json:"cluster_profiles,omitempty"`
+}
+
+func (cpl *ClusterProfilesList) Resolve() error {
+	errs := make([]error, 0)
+
+	clusterGroups := make(map[string][]string)
+	if cpl.KonfluxConfig != nil {
+		clusterGroups = cpl.KonfluxConfig.ClusterGroups
+	}
+
+	for i := range cpl.ClusterProfiles {
+		profile := &cpl.ClusterProfiles[i]
+
+	ownersLoop:
+		for j := range profile.Owners {
+			owner := &profile.Owners[j]
+			if owner.Konflux == nil {
+				continue ownersLoop
+			}
+
+			allClusters := sets.New(owner.Konflux.Clusters...)
+
+		clusterGroupsLoop:
+			for _, clusterGroupName := range owner.Konflux.ClusterGroups {
+				clusters, ok := clusterGroups[clusterGroupName]
+				if !ok {
+					err := fmt.Errorf("profiles[%d].owners[%d] cluster group %s not found", i, j, clusterGroupName)
+					errs = append(errs, err)
+					continue clusterGroupsLoop
+				}
+				allClusters.Insert(clusters...)
+			}
+
+			if allClusters.Len() > 0 {
+				owner.Konflux.Clusters = allClusters.UnsortedList()
+				slices.Sort(owner.Konflux.Clusters)
+			}
+		}
+	}
+
+	return aggerrs.NewAggregate(errs)
+}
+
 type ClusterProfilesMap map[ClusterProfile]ClusterProfileDetails
 
 type ClusterProfileDetails struct {
-	Profile     ClusterProfile         `yaml:"profile" json:"profile"`
-	Owners      []ClusterProfileOwners `yaml:"owners,omitempty" json:"owners,omitempty"`
-	ClusterType string                 `yaml:"cluster_type,omitempty" json:"cluster_type,omitempty"`
-	LeaseType   string                 `yaml:"lease_type,omitempty" json:"lease_type,omitempty"`
-	Secret      string                 `yaml:"secret,omitempty" json:"secret,omitempty"`
-	ConfigMap   string                 `yaml:"config_map,omitempty" json:"config_map,omitempty"`
+	Name          ClusterProfile         `yaml:"name,omitempty" json:"name,omitempty"`
+	Owners        []ClusterProfileOwners `yaml:"owners,omitempty" json:"owners,omitempty"`
+	ClusterType   string                 `yaml:"cluster_type,omitempty" json:"cluster_type,omitempty"`
+	LeaseType     string                 `yaml:"lease_type,omitempty" json:"lease_type,omitempty"`
+	Secret        string                 `yaml:"secret,omitempty" json:"secret,omitempty"`
+	ConfigMap     string                 `yaml:"config_map,omitempty" json:"config_map,omitempty"`
+	HubRoleARN    string                 `yaml:"hub_role_arn,omitempty" json:"hub_role_arn,omitempty"`
+	TargetRoleARN string                 `yaml:"target_role_arn,omitempty" json:"target_role_arn,omitempty"`
+}
+
+type ClusterProfileKonfluxOwner struct {
+	Tenant        string   `yaml:"tenant,omitempty" json:"tenant,omitempty"`
+	Clusters      []string `yaml:"clusters,omitempty" json:"clusters,omitempty"`
+	ClusterGroups []string `yaml:"cluster_groups,omitempty" json:"cluster_groups,omitempty"`
 }
 
 type ClusterProfileOwners struct {
-	Org   string   `yaml:"org" json:"org"`
-	Repos []string `yaml:"repos,omitempty" json:"repos,omitempty"`
+	Org     string                      `yaml:"org,omitempty" json:"org,omitempty"`
+	Repos   []string                    `yaml:"repos,omitempty" json:"repos,omitempty"`
+	Konflux *ClusterProfileKonfluxOwner `yaml:"konflux,omitempty" json:"konflux,omitempty"`
 }
 type ClusterClaimOwnersMap map[string]ClusterClaimDetails
+
+// +kubebuilder:object:generate=false
+type ClusterProfileSetDetails struct {
+	ClusterProfileSetDetailsNew
+}
+
+func (cps *ClusterProfileSetDetails) UnmarshalJSON(data []byte) error {
+	cpsDetails := make(map[ClusterProfile][]string)
+
+	if strings.Contains(string(data), `"cluster_profile_sets"`) {
+		newCPSDetails := ClusterProfileSetDetailsNew{}
+		if err := json.Unmarshal(data, &newCPSDetails); err != nil {
+			return fmt.Errorf("new ClusterProfileSetDetails schema: %w", err)
+		}
+		cps.ClusterProfileSetDetailsNew = newCPSDetails
+	} else {
+		if err := json.Unmarshal(data, &cpsDetails); err != nil {
+			return fmt.Errorf("old ClusterProfileSetDetails schema: %w", err)
+		}
+		cps.ClusterProfileSets = cpsDetails
+	}
+
+	return nil
+}
+
+// TODO: This will replace `ClusterProfileSetDetails` once the migration is complete.
+// +kubebuilder:object:generate=false
+type ClusterProfileSetDetailsNew struct {
+	ClusterProfileSets map[ClusterProfile][]string `json:"cluster_profile_sets,omitempty"`
+
+	// TestsAllowlist holds a list of tests for which we do not enfoce policy
+	// regarding the cluster profile sets usage.
+	// This deeply nested type match the following pattern:
+	//  "org/repo": "branch": "variant": "test"
+	TestsAllowlist map[utilregexp.Regexp]map[utilregexp.Regexp]map[utilregexp.Regexp][]string `json:"tests_allowlist,omitempty"`
+}
+
+func (cps ClusterProfileSetDetailsNew) FindSetByProfile(profile ClusterProfile) (ClusterProfile, bool) {
+	for cpsName, cpDetails := range cps.ClusterProfileSets {
+		if slices.Contains(cpDetails, string(profile)) {
+			return cpsName, true
+		}
+	}
+	return "", false
+}
+
+func (cps ClusterProfileSetDetailsNew) IsTestAllowlisted(test string, metadata Metadata) bool {
+	if cps.TestsAllowlist == nil {
+		return false
+	}
+
+	orgRepo, ok := utilregexp.LookupByMatch(cps.TestsAllowlist, metadata.Org+"/"+metadata.Repo)
+	if !ok {
+		return false
+	}
+
+	branch, ok := utilregexp.LookupByMatch(orgRepo, metadata.Branch)
+	if !ok {
+		return false
+	}
+
+	tests, ok := utilregexp.LookupByMatch(branch, metadata.Variant)
+	if !ok {
+		return false
+	}
+
+	return slices.Contains(tests, test)
+}
 
 type ClusterClaimDetails struct {
 	Claim  string                     `yaml:"claim"`

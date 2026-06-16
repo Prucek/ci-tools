@@ -187,6 +187,7 @@ const ciOperatorReferenceYaml = "# The list of base images describe\n" +
 	"    # Items is the list of images to build.\n" +
 	"    items:\n" +
 	"        - # AdditionalArchitectures is a list of additional architectures to build for. AMD64 architecture is included by default.\n" +
+	"          # DEPRECATED: use Capabilities instead\n" +
 	"          additional_architectures:\n" +
 	"            - \"\"\n" +
 	"          # BuildArgs contains build arguments that will be resolved in the Dockerfile.\n" +
@@ -196,6 +197,10 @@ const ciOperatorReferenceYaml = "# The list of base images describe\n" +
 	"              name: ' '\n" +
 	"              # Value of the build arg.\n" +
 	"              value: ' '\n" +
+	"          # Capabilities is the list of strings that\n" +
+	"          # define additional capabilities needed by the image build jobs\n" +
+	"          capabilities:\n" +
+	"            - \"\"\n" +
 	"          # ContextDir is the directory in the project\n" +
 	"          # from which this build should be run.\n" +
 	"          context_dir: ' '\n" +
@@ -242,6 +247,16 @@ const ciOperatorReferenceYaml = "# The list of base images describe\n" +
 	"    # PipelineSkipIfOnlyChanged is a regex that will cause the auto-generated images\n" +
 	"    # presubmit to be skipped in the second stage of the pipeline if all changed files match the regex.\n" +
 	"    pipeline_skip_if_only_changed: ' '\n" +
+	"    # SlackReporterConfig configures Slack notifications for the auto-generated images jobs.\n" +
+	"    reporter_config:\n" +
+	"        channel: ' '\n" +
+	"        job_states_to_report:\n" +
+	"            - \"\"\n" +
+	"        # ReportPresubmit controls whether the presubmit job generated from a\n" +
+	"        # periodic test with `presubmit: true` also gets this slack config.\n" +
+	"        # Only valid when the test has `presubmit: true`.\n" +
+	"        report_presubmit: true\n" +
+	"        report_template: ' '\n" +
 	"    # RunIfChanged is a regex that will cause the auto-generated images\n" +
 	"    # presubmit to only run if a file matching the regex is changed.\n" +
 	"    run_if_changed: ' '\n" +
@@ -336,6 +351,15 @@ const ciOperatorReferenceYaml = "# The list of base images describe\n" +
 	"          tag_by_commit: true\n" +
 	"prowgen:\n" +
 	"    disable_rehearsals: true\n" +
+	"    enable_secrets_store_csi_driver: true\n" +
+	"    # Expose declares that jobs should not be hidden from view in deck if they\n" +
+	"    # are private. This field has no effect if private is not set.\n" +
+	"    expose: true\n" +
+	"    # Private indicates that generated jobs should be marked as hidden\n" +
+	"    # from display in deck and that they should mount appropriate git credentials\n" +
+	"    # to clone the repository under test.\n" +
+	"    private: true\n" +
+	"    skip_operator_presubmits: true\n" +
 	"# RawSteps are literal Steps that should be\n" +
 	"# included in the final pipeline.\n" +
 	"raw_steps:\n" +
@@ -442,6 +466,7 @@ const ciOperatorReferenceYaml = "# The list of base images describe\n" +
 	"        ref: ' '\n" +
 	"      project_directory_image_build_step:\n" +
 	"        # AdditionalArchitectures is a list of additional architectures to build for. AMD64 architecture is included by default.\n" +
+	"        # DEPRECATED: use Capabilities instead\n" +
 	"        additional_architectures:\n" +
 	"            - \"\"\n" +
 	"        # BuildArgs contains build arguments that will be resolved in the Dockerfile.\n" +
@@ -451,6 +476,10 @@ const ciOperatorReferenceYaml = "# The list of base images describe\n" +
 	"              name: ' '\n" +
 	"              # Value of the build arg.\n" +
 	"              value: ' '\n" +
+	"        # Capabilities is the list of strings that\n" +
+	"        # define additional capabilities needed by the image build jobs\n" +
+	"        capabilities:\n" +
+	"            - \"\"\n" +
 	"        # ContextDir is the directory in the project\n" +
 	"        # from which this build should be run.\n" +
 	"        context_dir: ' '\n" +
@@ -1066,6 +1095,16 @@ const ciOperatorReferenceYaml = "# The list of base images describe\n" +
 	"        # The job must be configured as a verification or periodic job in a\n" +
 	"        # release-controller config file when this field is set to `true`.\n" +
 	"        release_controller: true\n" +
+	"        # SlackReporterConfig configures Slack notifications for this test's generated jobs.\n" +
+	"        reporter_config:\n" +
+	"            channel: ' '\n" +
+	"            job_states_to_report:\n" +
+	"                - \"\"\n" +
+	"            # ReportPresubmit controls whether the presubmit job generated from a\n" +
+	"            # periodic test with `presubmit: true` also gets this slack config.\n" +
+	"            # Only valid when the test has `presubmit: true`.\n" +
+	"            report_presubmit: true\n" +
+	"            report_template: ' '\n" +
 	"        # RestrictNetworkAccess restricts network access to RedHat intranet.\n" +
 	"        restrict_network_access: false\n" +
 	"        # Retry is a configuration entry for retrying periodic prowjobs\n" +
@@ -1988,6 +2027,16 @@ const ciOperatorReferenceYaml = "# The list of base images describe\n" +
 	"      # The job must be configured as a verification or periodic job in a\n" +
 	"      # release-controller config file when this field is set to `true`.\n" +
 	"      release_controller: true\n" +
+	"      # SlackReporterConfig configures Slack notifications for this test's generated jobs.\n" +
+	"      reporter_config:\n" +
+	"        channel: ' '\n" +
+	"        job_states_to_report:\n" +
+	"            - \"\"\n" +
+	"        # ReportPresubmit controls whether the presubmit job generated from a\n" +
+	"        # periodic test with `presubmit: true` also gets this slack config.\n" +
+	"        # Only valid when the test has `presubmit: true`.\n" +
+	"        report_presubmit: true\n" +
+	"        report_template: ' '\n" +
 	"      # RestrictNetworkAccess restricts network access to RedHat intranet.\n" +
 	"      restrict_network_access: false\n" +
 	"      # Retry is a configuration entry for retrying periodic prowjobs\n" +

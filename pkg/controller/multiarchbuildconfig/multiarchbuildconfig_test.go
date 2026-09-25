@@ -47,8 +47,64 @@ type mockManifestPusher struct {
 	errToReturn error
 }
 
-func (m *mockManifestPusher) PushImageWithManifest(builds []buildv1.Build, targetImageRef string) error {
+func (m *mockManifestPusher) PushImageWithManifest(builds []buildv1.Build, buildImageRef string) error {
 	return m.errToReturn
+}
+
+func TestTargetImageRef(t *testing.T) {
+	tests := []struct {
+		name            string
+		outputNamespace string
+		want            string
+	}{
+		{name: "explicit namespace", outputNamespace: "ocp", want: "ocp/cli-yq:latest"},
+		{name: "default namespace", want: "ci/cli-yq:latest"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mabc := &v1.MultiArchBuildConfig{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "ci"},
+				Spec: v1.MultiArchBuildConfigSpec{
+					BuildSpec: buildv1.BuildConfigSpec{CommonSpec: buildv1.CommonSpec{
+						Output: buildv1.BuildOutput{To: &corev1.ObjectReference{Namespace: tt.outputNamespace, Name: "cli-yq:latest"}},
+					}},
+				},
+			}
+			if got := targetImageRef(mabc); got != tt.want {
+				t.Errorf("targetImageRef() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildImageRef(t *testing.T) {
+	tests := []struct {
+		name               string
+		outputNamespace    string
+		externalRegistries []string
+		want               string
+	}{
+		{name: "cross namespace external target", outputNamespace: "ocp", externalRegistries: []string{"quay.io/openshift/ci"}, want: "ci/ocp-cli-yq:latest"},
+		{name: "same namespace external target", outputNamespace: "ci", externalRegistries: []string{"quay.io/openshift/ci"}, want: "ci/cli-yq:latest"},
+		{name: "default output namespace", externalRegistries: []string{"quay.io/openshift/ci"}, want: "ci/cli-yq:latest"},
+		{name: "cross namespace without external target", outputNamespace: "ocp", want: "ocp/cli-yq:latest"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mabc := &v1.MultiArchBuildConfig{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "ci"},
+				Spec: v1.MultiArchBuildConfigSpec{
+					BuildSpec: buildv1.BuildConfigSpec{CommonSpec: buildv1.CommonSpec{
+						Output: buildv1.BuildOutput{To: &corev1.ObjectReference{Namespace: tt.outputNamespace, Name: "cli-yq:latest"}},
+					}},
+					ExternalRegistries: tt.externalRegistries,
+				},
+			}
+			if got := buildImageRef(mabc); got != tt.want {
+				t.Errorf("buildImageRef() = %q, want %q", got, tt.want)
+			}
+		})
+	}
 }
 
 type buildBuilder struct {
@@ -189,20 +245,21 @@ func TestCheckAllBuildsSuccessful(t *testing.T) {
 	}
 }
 
-func TestBuildOwnerReference(t *testing.T) {
+func TestCreateBuilds(t *testing.T) {
 	mabc := &v1.MultiArchBuildConfig{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-mabc",
-			Namespace: "test-ns",
+			Namespace: "ci",
 		},
 		Spec: v1.MultiArchBuildConfigSpec{
 			BuildSpec: buildv1.BuildConfigSpec{
 				CommonSpec: buildv1.CommonSpec{
 					Output: buildv1.BuildOutput{
-						To: &corev1.ObjectReference{Namespace: "test-ns", Name: "test-image"},
+						To: &corev1.ObjectReference{Kind: "ImageStreamTag", Namespace: "ocp", Name: "cli-yq:latest"},
 					},
 				},
 			},
+			ExternalRegistries: []string{"quay.io/openshift/ci"},
 		},
 	}
 
@@ -214,9 +271,8 @@ func TestBuildOwnerReference(t *testing.T) {
 		scheme:        scheme,
 	}
 
-	nn := types.NamespacedName{Name: mabc.Name, Namespace: mabc.Namespace}
-	if err := r.reconcile(context.TODO(), r.logger, reconcile.Request{NamespacedName: nn}); err != nil {
-		t.Fatalf("Failed to reconcile: %v", err)
+	if err := r.createBuilds(context.TODO(), r.logger, mabc); err != nil {
+		t.Fatalf("Failed to create builds: %v", err)
 	}
 
 	builds := buildv1.BuildList{}
@@ -229,7 +285,7 @@ func TestBuildOwnerReference(t *testing.T) {
 			{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-mabc-amd64",
-					Namespace: "test-ns",
+					Namespace: "ci",
 					Labels: map[string]string{
 						"multiarchbuildconfigs.ci.openshift.io/arch": "amd64",
 						"multiarchbuildconfigs.ci.openshift.io/name": "test-mabc",
@@ -250,7 +306,7 @@ func TestBuildOwnerReference(t *testing.T) {
 			{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-mabc-arm64",
-					Namespace: "test-ns",
+					Namespace: "ci",
 					Labels: map[string]string{
 						"multiarchbuildconfigs.ci.openshift.io/arch": "arm64",
 						"multiarchbuildconfigs.ci.openshift.io/name": "test-mabc",
@@ -276,6 +332,15 @@ func TestBuildOwnerReference(t *testing.T) {
 		cmpopts.IgnoreFields(buildv1.Build{}, "Spec", "Kind"),
 	); diff != "" {
 		t.Error(diff)
+	}
+	for _, build := range builds.Items {
+		want := "ocp-cli-yq:latest-" + build.Labels[v1.MultiArchBuildConfigArchLabel]
+		if got := build.Spec.Output.To; got.Namespace != "ci" || got.Name != want {
+			t.Errorf("build %s output = %s/%s, want ci/%s", build.Name, got.Namespace, got.Name, want)
+		}
+		if got, want := build.Spec.NodeSelector[nodeArchitectureLabel], build.Labels[v1.MultiArchBuildConfigArchLabel]; got != want {
+			t.Errorf("build %s node architecture = %q, want %q", build.Name, got, want)
+		}
 	}
 }
 
